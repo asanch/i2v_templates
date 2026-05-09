@@ -96,6 +96,50 @@ def _write_metadata(output_dir: Path, payload: dict[str, Any]) -> None:
 # ─── run_image_pass — single pass ────────────────────────────────────────────
 
 
+# Suffix appended to the prompt whenever a pass has reference photos. Tells the
+# model which image is the primary edit target and that the others are
+# architecture-only references. Worded model-agnostically — works for Nano
+# Banana edit (which sees images as a list) and would also be accepted by
+# Seedance's @Image1 tag system if we ever route an image-edit through it.
+_ROLE_ASSIGNMENT_SUFFIX = (
+    "\n\nARCHITECTURE REFERENCES:\n"
+    "The first input image is the PRIMARY subject for editing — preserve its "
+    "viewpoint, framing, composition, and the position of every visible feature. "
+    "The additional input images show the same room from different angles — use "
+    "them ONLY as architecture references to preserve walls, cabinets, fixtures, "
+    "windows, doors, materials, and overall layout. Do not introduce any "
+    "architectural feature not visible in any reference image. Do not blend, "
+    "transition between, or morph toward the reference angles. The output must "
+    "remain in the viewpoint of the first input image."
+)
+
+
+def _resolve_references(
+    pass_spec: ImagePass,
+    cli_overrides: list[str] | None,
+) -> list[Path]:
+    """Pick the effective reference photos for this pass.
+
+    Precedence:
+      1. CLI override (cli_overrides) — when set, replaces template references.
+      2. Template-declared references (pass_spec.reference_photos).
+
+    Result is capped at pass_spec.max_references. Paths are resolved to
+    absolute and validated to exist.
+    """
+    raw = cli_overrides if cli_overrides is not None else list(pass_spec.reference_photos)
+    if pass_spec.max_references == 0:
+        return []
+    capped = raw[: pass_spec.max_references]
+    resolved: list[Path] = []
+    for r in capped:
+        p = Path(r).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"Reference image not found: {p}")
+        resolved.append(p)
+    return resolved
+
+
 def run_image_pass(
     input_image_path: str | Path,
     pass_spec: ImagePass,
@@ -105,11 +149,13 @@ def run_image_pass(
     pass_label: str | None = None,
     with_logs: bool = False,
     model_override: str | None = None,
+    reference_photos_override: list[str] | None = None,
 ) -> ImagePassResult:
     """Run a single image-to-image pass.
 
     Args:
-        input_image_path: local path to the input image (jpg/png/webp/heic).
+        input_image_path: local path to the PRIMARY input image (jpg/png/webp/heic).
+            This is the edit target — the model produces a modified version of it.
         pass_spec: the ImagePass spec from the template.
         output_dir: directory to write the output image and metadata into.
             Created if it doesn't exist.
@@ -120,10 +166,14 @@ def run_image_pass(
         with_logs: stream fal logs to stdout while the job runs.
         model_override: ignore pass_spec.model and use this model id instead.
             Useful for A/B'ing different image models on the same prompt.
+        reference_photos_override: when set, replaces pass_spec.reference_photos
+            for this run. Used by the CLI's --references flag so the user can
+            try multi-reference without editing the template.
 
     Returns:
         ImagePassResult with the local output path, the generation URL, the
-        full prompt + parameters used, and the wall-clock duration.
+        full prompt + parameters used (including the role-assignment suffix
+        when references were active), and the wall-clock duration.
     """
     in_path = Path(input_image_path).resolve()
     if not in_path.exists():
@@ -135,25 +185,50 @@ def run_image_pass(
     model_id = model_override or pass_spec.model
     adapter: ModelAdapter = resolve_model(model_id)
 
-    # 1. Upload the input image so fal can fetch it.
-    print(f"  [pass {pass_index}] uploading {in_path.name} to fal...")
-    image_url = fal_client.upload_local_file(in_path)
+    # 1. Resolve references and build the upload list.
+    refs = _resolve_references(pass_spec, reference_photos_override)
+    has_refs = len(refs) > 0
 
-    # 2. Build model-specific arguments.
-    arguments = adapter.build_arguments([image_url], pass_spec.prompt, pass_spec.parameters)
+    # 2. Upload primary first (it's image 1 / the edit target), then references.
+    print(f"  [pass {pass_index}] uploading primary {in_path.name} to fal...")
+    primary_url = fal_client.upload_local_file(in_path)
+    image_urls: list[str] = [primary_url]
+    for ref in refs:
+        print(f"  [pass {pass_index}] uploading reference {ref.name} to fal...")
+        image_urls.append(fal_client.upload_local_file(ref))
+
+    # 3. Build model arguments. If multi-image isn't supported by this model
+    #    adapter (e.g. FLUX Kontext currently takes a single image), warn and
+    #    drop refs — single-image still works.
+    effective_prompt = pass_spec.prompt + (_ROLE_ASSIGNMENT_SUFFIX if has_refs else "")
+    if has_refs and "flux-pro/kontext" in model_id:
+        # FLUX Kontext (current fal route) takes one image_url; references
+        # would be silently dropped. Be explicit about it instead of guessing.
+        print(
+            f"  [pass {pass_index}] WARN: model {model_id} does not accept multi-image "
+            f"input — dropping {len(refs)} reference(s). Switch to fal-ai/nano-banana/edit "
+            f"to use references."
+        )
+        image_urls = image_urls[:1]
+        effective_prompt = pass_spec.prompt
+        refs = []
+        has_refs = False
+
+    arguments = adapter.build_arguments(image_urls, effective_prompt, pass_spec.parameters)
     if pass_spec.negative_prompt:
         arguments["negative_prompt"] = pass_spec.negative_prompt
 
     print(
-        f"  [pass {pass_index}] running model={model_id} prompt={pass_spec.prompt[:80]!r}..."
+        f"  [pass {pass_index}] running model={model_id} "
+        f"refs={len(refs)} prompt={pass_spec.prompt[:80]!r}..."
     )
 
-    # 3. Submit synchronously.
+    # 4. Submit synchronously.
     started = time.time()
     response = fal_client.subscribe(model_id, arguments, with_logs=with_logs)
     duration = time.time() - started
 
-    # 4. Pull output URL and download.
+    # 5. Pull output URL and download.
     output_url = adapter.extract_output_url(response)
     ext = _output_extension(pass_spec.parameters)
     out_filename = f"pass_{pass_index:02d}_{label}.{ext}"
@@ -165,16 +240,17 @@ def run_image_pass(
         pass_index=pass_index,
         pass_label=label,
         model=model_id,
-        prompt=pass_spec.prompt,
+        prompt=effective_prompt,
         parameters=dict(pass_spec.parameters),
         input_path=str(in_path),
+        reference_paths=[str(r) for r in refs],
         output_path=str(out_path),
         output_url=output_url,
         duration_sec=round(duration, 2),
         raw_response={"images_count": len(response.get("images", []) or [])},
     )
 
-    # 5. Append to metadata.json so this pass is auditable.
+    # 6. Append to metadata.json so this pass is auditable.
     _write_metadata(
         out_dir,
         {
@@ -197,6 +273,7 @@ def run_image_pipeline(
     template_id: str = "ad-hoc",
     with_logs: bool = False,
     model_override: str | None = None,
+    reference_photos_override: list[str] | None = None,
 ) -> ImagePipelineResult:
     """Run a slot's full multi-pass image pipeline.
 
@@ -216,6 +293,10 @@ def run_image_pipeline(
         with_logs: stream fal logs to stdout.
         model_override: when set, every pass ignores its own model and uses this
             model instead. For A/B testing models across the chain.
+        reference_photos_override: when set, replaces template-declared
+            reference_photos for ALL passes whose source is 'input_photo'.
+            Passes whose source is 'previous_pass' are unaffected — they only
+            see the prior output anyway. CLI override semantics.
 
     Returns:
         ImagePipelineResult with all pass outputs and a final_output_path
@@ -261,6 +342,13 @@ def run_image_pipeline(
         else:  # exhaustive — pydantic constrains the type
             raise AssertionError(f"Unknown pass source: {pass_spec.source}")
 
+        # CLI reference override only applies to passes that read the
+        # original photo. Chained passes (source='previous_pass') don't
+        # need architecture refs — their input is already the graded primary.
+        refs_for_this_pass = (
+            reference_photos_override if pass_spec.source == "input_photo" else None
+        )
+
         result = run_image_pass(
             this_input,
             pass_spec,
@@ -269,6 +357,7 @@ def run_image_pipeline(
             pass_label=pass_spec.label,
             with_logs=with_logs,
             model_override=model_override,
+            reference_photos_override=refs_for_this_pass,
         )
         pass_results.append(result)
         prev_output_path = Path(result.output_path)

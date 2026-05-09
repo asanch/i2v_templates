@@ -39,7 +39,7 @@
       ],
       "video_pass": {
         "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Super smooth camera moves forward in straight line through space, cinematic. Time-lapse light progression, shadows gradually move and lengthen, parallax effect, consistent exposure, stable motion, photorealistic.",
+        "prompt": "Static exterior shot of the house with very subtle camera push forward, less than 5 percent of frame. Architecture remains exactly stable — rooflines, windows, doors, and façade details do not change shape or position. Soft directional sunlight gradually shifts as if minutes are passing; shadows on the façade lengthen subtly. Slow gentle cloud drift in the sky. No lens flare, no light beams, no dramatic light events, no atmospheric particles, no weather changes. Smooth stable motion, no camera shake. Cinematic editorial film grain. Neutral white balance, photorealistic.",
         "duration_sec": 6,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,
@@ -75,7 +75,7 @@
       ],
       "video_pass": {
         "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Wide interior shot with slow trucking movement side to side as harsh directional light moves and expands across modern living space. Dramatic shadows crawl and shift across surfaces, cabinetry, and counters. Crisp shadow edges in motion. Camera tracks laterally through scene while light travels. Editorial film style. Neutral white balance, balanced exposure. Smooth parallel motion. Atmospheric architectural cinematography.",
+        "prompt": "Static wide interior of the kitchen with extremely subtle camera drift, less than 4 percent of frame. Cabinetry, countertops, island, fixtures, appliances, and floor remain exactly stable — no morphing, no shape changes, no warping of edges or hardware. Soft natural sunlight gradually shifts across countertops and cabinet faces as if minutes are passing. Gentle, subtle shadow movement only. No dramatic light events, no lens flare, no lightning, no sudden brightness shifts, no atmospheric haze. Stable geometry throughout. Cinematic editorial film grain. Neutral white balance, photorealistic.",
         "duration_sec": 6,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,
@@ -116,7 +116,7 @@
       ],
       "video_pass": {
         "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Extreme close-up detail shot with smooth tracking camera following harsh directional light as it grows and spreads across the textured surface. Crisp shadow edges crawl and shift in real time. Camera moves with the light's path revealing texture in stone, wood grain, and architectural detail. Editorial film style. Neutral white balance, balanced exposure — deep dramatic shadows without underexposure. Shallow depth of field.",
+        "prompt": "Tight static close-up shot. Camera holds nearly still with at most 2 percent drift. The countertop edge, sink, faucet, and cabinetry beneath remain exactly stable — materials, edges, hardware, and joinery do not change shape, position, or texture. Soft directional light gradually shifts across the stone surface; subtle shadow movement only. Shallow depth of field; bokeh background remains coherent and does not morph. No dramatic light events, no lens flare, no morphing of materials, no liquid or condensation appearing. Photorealistic editorial style, film grain. Neutral white balance.",
         "duration_sec": 5,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,

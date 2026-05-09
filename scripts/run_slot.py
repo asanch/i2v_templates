@@ -49,7 +49,17 @@ from i2v.video_pass import run_video_pass
     "input_image_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
-    help="Local path to the input photo.",
+    help="Local path to the PRIMARY input photo (the edit target / first frame).",
+)
+@click.option(
+    "--references",
+    "references_csv",
+    default=None,
+    type=str,
+    help="Comma-separated paths to ADDITIONAL reference photos of the same scene "
+    "from different angles. Used as architecture anchors only — not edited. "
+    "Capped at the pass's max_references (default 4). "
+    "Example: --references inputs/IMG_5316.JPG,inputs/IMG_5290.JPG",
 )
 @click.option(
     "--output-root",
@@ -92,6 +102,7 @@ def main(
     template_path: str,
     slot_id: str,
     input_image_path: str,
+    references_csv: str | None,
     output_root: str,
     override_model: str | None,
     include_video: bool,
@@ -102,12 +113,18 @@ def main(
     template = load_template(template_path)
     slot = get_slot(template, slot_id)
 
+    # Parse --references CSV. Empty/whitespace entries are dropped.
+    references: list[str] | None = None
+    if references_csv:
+        references = [p.strip() for p in references_csv.split(",") if p.strip()]
+
     click.echo(
         f"Template:   {template.template.id} ({template.template.name})\n"
         f"Slot:       {slot.id} — {slot.label}\n"
         f"Image:      {len(slot.image_pipeline)} pass(es)\n"
         f"Video:      {'yes (' + slot.video_pass.model + ')' if include_video and slot.video_pass else 'skipped'}\n"
-        f"Input:      {input_image_path}\n"
+        f"Primary:    {input_image_path}\n"
+        f"References: {references or '(none — single-image mode)'}\n"
     )
     if override_model:
         click.secho(f"Image-model override: every pass will use {override_model}", fg="yellow")
@@ -119,6 +136,7 @@ def main(
         template_id=template.template.id,
         with_logs=with_logs,
         model_override=override_model,
+        reference_photos_override=references,
     )
 
     click.echo("\nIMAGE PIPELINE DONE")

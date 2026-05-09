@@ -35,9 +35,9 @@ class ImagePass(BaseModel):
     )
     source: PassSource = Field(
         default="input_photo",
-        description="Where this pass's input image comes from. The first pass should "
-        "almost always be 'input_photo'; subsequent passes typically chain "
-        "from 'previous_pass'.",
+        description="Where this pass's PRIMARY input image comes from. The first pass "
+        "should almost always be 'input_photo'; subsequent passes typically chain "
+        "from 'previous_pass'. The primary is the edit target.",
     )
     model: str = Field(
         description="fal model id, e.g. 'fal-ai/nano-banana/edit'. See i2v.models for "
@@ -49,6 +49,27 @@ class ImagePass(BaseModel):
         default_factory=dict,
         description="Forwarded to the model adapter. Common keys: aspect_ratio, "
         "output_format, num_images, image_size, temperature.",
+    )
+    reference_photos: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional architecture-anchor photos passed alongside the primary source. "
+            "These are NOT edit targets — they only condition the model so that walls, "
+            "fixtures, materials, and layout from the primary view are preserved. "
+            "Best when they're real photos of the same room from different angles. "
+            "Per Seedance/Nano Banana research: 3–5 focused references beat 9 random "
+            "ones. Capped by max_references."
+        ),
+    )
+    max_references: int = Field(
+        default=4,
+        ge=0,
+        le=8,
+        description=(
+            "Cap on how many references to pass to the model. 3–4 is the sweet spot; "
+            "more dilutes the primary's priority. Set to 0 to ignore reference_photos "
+            "entirely for this pass."
+        ),
     )
 
     @field_validator("label")
@@ -224,6 +245,12 @@ class ImagePassResult(BaseModel):
     prompt: str
     parameters: dict[str, Any]
     input_path: str
+    reference_paths: list[str] = Field(
+        default_factory=list,
+        description="Architecture-anchor photos that were passed alongside the primary "
+        "input. Empty if the pass was single-image. Stamped for audit so we can "
+        "reproduce a successful run exactly.",
+    )
     output_path: str
     output_url: str | None = None
     duration_sec: float
