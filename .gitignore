@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# i2v_templates project-specific
+inputs/
+outputs/
+*.mp4
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.heic
+!templates/**/*.png
+!templates/**/*.jpg
+.fal_cache/

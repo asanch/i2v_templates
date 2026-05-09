@@ -1,0 +1,145 @@
+{
+  "schema_version": "1.0",
+  "template": {
+    "id": "cinematic-editorial-v1",
+    "name": "Cinematic Editorial — Architectural",
+    "author": "Aaron",
+    "description": "Eight-shot cinematic walkthrough in the editorial-architectural style. Harsh directional shadows, controlled exposure, slow camera moves, time-lapse light progression. Prompts derived verbatim from the AutoHDR creator-iteration kit.",
+    "reference_url": null,
+    "duration_sec": 44,
+    "aspect_ratio": "16:9",
+    "resolution": "1920x1080",
+    "fps": 24
+  },
+
+  "slots": [
+    {
+      "id": "01_hero_exterior_dolly_in",
+      "label": "Hero Exterior — Dolly In",
+      "order": 1,
+      "required": true,
+      "photo_requirement": {
+        "scene_kind": "exterior_front",
+        "intent": "Front of the house, full façade visible, framed from across the street or driveway.",
+        "composition_hints": [
+          "Stand 25–40 ft from the front of the house",
+          "Center the front door horizontally; keep camera level",
+          "Get the full roofline and a sliver of foreground in frame"
+        ],
+        "ideal_time_of_day": "golden"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. Highlights should stay controlled and natural. Editorial film style, atmospheric architectural cinematography. Preserve all architectural details. Sky density preserved.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
+        "prompt": "Super smooth camera moves forward in straight line through space, cinematic. Time-lapse light progression, shadows gradually move and lengthen, parallax effect, consistent exposure, stable motion, photorealistic.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": { "generate_audio": false }
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 400, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "03_kitchen_wide_truck",
+      "label": "Kitchen — Wide Slider Truck",
+      "order": 3,
+      "required": true,
+      "photo_requirement": {
+        "scene_kind": "kitchen",
+        "intent": "Wide kitchen shot showing the island or main run of cabinetry, with at least one window or natural light source in frame.",
+        "composition_hints": [
+          "Stand at one corner of the kitchen, capture the full opposite wall",
+          "Get the full counter or island in frame",
+          "Aim for visible natural light from a window or doorway",
+          "Clear the counters of clutter"
+        ],
+        "ideal_time_of_day": "midday"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. The interior should feel brighter and more intentional, not flat or evenly lit—shadows must remain graphic, directional, and editorial. Highlights should stay controlled and natural. Apply intentional, filmic window pulls that reveal deep, rich exterior views—preserve sky density, environmental color, and contrast beyond the glass. Exterior scenes should feel dimensional and weighty, never washed out or pastel. Window highlights must roll off smoothly with realistic falloff; avoid haloing, edge glow, or global tonal compression. Do not flatten contrast or lift blacks globally. Window recovery should feel localized, natural, and optically believable—similar to a well-exposed negative rather than HDR processing. Preserve all architectural and interior details. The scene should feel well-lit yet moody, polished and cinematic. Derive all lighting direction strictly from visible sources in the frame—windows, doors, architectural openings, and practical fixtures (lamps, sconces, pendants). Do not introduce light from walls or areas without logical entry points. Maintain strong tonal separation between interior shadows and exterior highlights; window views should read clear, saturated, and contrast-rich, while the interior retains depth, drama, and editorial punch.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
+        "prompt": "Wide interior shot with slow trucking movement side to side as harsh directional light moves and expands across modern living space. Dramatic shadows crawl and shift across surfaces, cabinetry, and counters. Crisp shadow edges in motion. Camera tracks laterally through scene while light travels. Editorial film style. Neutral white balance, balanced exposure. Smooth parallel motion. Atmospheric architectural cinematography.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": { "generate_audio": false }
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "06_kitchen_detail_85mm",
+      "label": "Kitchen — 85mm Detail Recompose",
+      "order": 6,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "kitchen",
+        "intent": "Same source photo as the kitchen wide. The image pipeline recomposes it into a tight 85mm detail shot of the island corner with shallow depth of field. Two-pass chain: first cinematic editorial enhance, then recompose to detail.",
+        "composition_hints": [
+          "Reuse the same wide kitchen photo used for slot 03",
+          "Source must include an island or counter corner with sink or feature visible"
+        ],
+        "ideal_time_of_day": "midday"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. The interior should feel brighter and more intentional, not flat or evenly lit—shadows must remain graphic, directional, and editorial. Highlights should stay controlled and natural. Apply intentional, filmic window pulls that reveal deep, rich exterior views—preserve sky density, environmental color, and contrast beyond the glass. Exterior scenes should feel dimensional and weighty, never washed out or pastel. Window highlights must roll off smoothly with realistic falloff; avoid haloing, edge glow, or global tonal compression. Do not flatten contrast or lift blacks globally. Window recovery should feel localized, natural, and optically believable—similar to a well-exposed negative rather than HDR processing. Preserve all architectural and interior details. The scene should feel well-lit yet moody, polished and cinematic. Derive all lighting direction strictly from visible sources in the frame—windows, doors, architectural openings, and practical fixtures (lamps, sconces, pendants). Do not introduce light from walls or areas without logical entry points. Maintain strong tonal separation between interior shadows and exterior highlights; window views should read clear, saturated, and contrast-rich, while the interior retains depth, drama, and editorial punch.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        },
+        {
+          "label": "recompose_detail",
+          "source": "previous_pass",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "Recompose this image as an 85mm close-up detail shot of the kitchen island corner — focus on the countertop edge, sink area, faucet, and the cabinetry beneath. Tight crop, shallow depth of field with cinematic bokeh on the background. Preserve the original materials, colors, white balance, and lighting direction. Cinematic editorial style. Neutral white balance, balanced exposure — deep shadows without underexposure. Sharp texture detail in stone countertop, wood cabinetry, and architectural elements. Shallow depth of field.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
+        "prompt": "Extreme close-up detail shot with smooth tracking camera following harsh directional light as it grows and spreads across the textured surface. Crisp shadow edges crawl and shift in real time. Camera moves with the light's path revealing texture in stone, wood grain, and architectural detail. Editorial film style. Neutral white balance, balanced exposure — deep dramatic shadows without underexposure. Shallow depth of field.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": { "generate_audio": false }
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    }
+  ],
+
+  "transitions": [],
+
+  "music": {
+    "track_path": "assets/music/cinematic-editorial-v1.mp3",
+    "track_credit": "REPLACE — license-cleared track from Pixabay/Artlist before submission",
+    "start_offset_ms": 0,
+    "master_volume_db": -6,
+    "fade_in_ms": 800,
+    "fade_out_ms": 1500
+  },
+
+  "post": {
+    "global_lut": null,
+    "title_card": null,
+    "watermark": null
+  }
+}
