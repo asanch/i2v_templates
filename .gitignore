@@ -229,3 +229,13 @@ outputs/
 !templates/**/*.png
 !templates/**/*.jpg
 .fal_cache/
+
+# Next.js / Node (under app/)
+app/node_modules/
+app/.next/
+app/out/
+app/.env.local
+app/.env.*.local
+app/next-env.d.ts
+app/tsconfig.tsbuildinfo
+app/*.tsbuildinfo
