@@ -44,6 +44,8 @@ from api.jobs import (
     run_slot_job,
     run_template_job,
 )
+from i2v.models import list_known_models
+from i2v.video_models import list_known_video_models
 
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
@@ -280,7 +282,14 @@ class RunSlotRequest(BaseModel):
     project_slug: str
     template_id: str
     slot_id: str
-    generative_video_model: str | None = None  # default Kling 3.0 Pro per jobs.DEFAULT
+    # Override the per-slot template-defined image model for every pass in
+    # the image pipeline. None = use whatever the template says per pass.
+    image_model: str | None = None
+    # Override the slot's video model. None = use template default
+    # (DepthFlow preset for most slots; Kling 3.0 when an end frame is
+    # synthesized). Set to a registered video model id to force a
+    # specific model for ALL slots regardless of strategy.
+    generative_video_model: str | None = None
     video_duration: int | None = None
 
 
@@ -312,9 +321,8 @@ def jobs_run_slot(req: RunSlotRequest, background: BackgroundTasks) -> JobRecord
         project_slug=req.project_slug,
         template_id=req.template_id,
         slot_id=req.slot_id,
-        generative_video_model=(
-            req.generative_video_model or DEFAULT_GENERATIVE_VIDEO_MODEL
-        ),
+        image_model=req.image_model,
+        generative_video_model=req.generative_video_model,
         video_duration=req.video_duration or DEFAULT_VIDEO_DURATION_SEC,
     )
     return job
@@ -432,6 +440,52 @@ def create_project(req: CreateProjectRequest) -> dict:
     }
 
 
+# ─── Model registries ───────────────────────────────────────────────────────
+
+
+@app.get("/models")
+def get_models() -> dict:
+    """Both registries (image + video models) so the studio can populate
+    its model-picker dropdowns. Image and video are returned in a single
+    response — the UI typically needs both at once.
+
+    Each entry carries the canonical fal id, a human-readable label,
+    free-form notes, and (for video) backend + duration constraints so
+    the UI can disable picks that won't work for a given slot.
+    """
+    image_models = [
+        {
+            "id": m.id,
+            "label": m.label,
+            "notes": m.notes,
+            "default_for": list(m.default_for),
+        }
+        for m in list_known_models()
+    ]
+    video_models = [
+        {
+            "id": m.id,
+            "label": m.label,
+            "notes": m.notes,
+            "backend": m.backend,
+            "supports_end_frame": m.supports_end_frame,
+            "min_duration": m.min_duration,
+            "max_duration": m.max_duration,
+            "allowed_durations": list(m.allowed_durations) if m.allowed_durations else None,
+            "cost_per_sec": m.cost_per_sec,
+        }
+        for m in list_known_video_models()
+    ]
+    return {
+        "image_models": image_models,
+        "video_models": video_models,
+        "defaults": {
+            "generative_video_model": DEFAULT_GENERATIVE_VIDEO_MODEL,
+            "video_duration_sec": DEFAULT_VIDEO_DURATION_SEC,
+        },
+    }
+
+
 # ─── Audio + walkthrough exports ─────────────────────────────────────────────
 
 
@@ -439,6 +493,7 @@ class RunTemplateRequest(BaseModel):
     project_slug: str
     template_id: str
     audio_track: str | None = None  # filename under audio/, or null
+    image_model: str | None = None
     generative_video_model: str | None = None
     video_duration: int | None = None
 
@@ -467,18 +522,23 @@ def jobs_run_template(req: RunTemplateRequest, background: BackgroundTasks) -> J
         project_slug=req.project_slug,
         template_id=req.template_id,
         audio_track=req.audio_track,
-        generative_video_model=(
-            req.generative_video_model or DEFAULT_GENERATIVE_VIDEO_MODEL
-        ),
+        image_model=req.image_model,
+        generative_video_model=req.generative_video_model,
         video_duration=req.video_duration or DEFAULT_VIDEO_DURATION_SEC,
     )
     return job
 
 
-@app.get("/audio/tracks")
+@app.get("/audio-tracks")
 def audio_tracks() -> list[dict]:
     """List all audio files in audio/. Frontend renders these as the audio
-    track dropdown."""
+    track dropdown.
+
+    Note: this lives at /audio-tracks (hyphenated) rather than /audio/tracks
+    because the StaticFiles mount at /audio/ claims every GET under that
+    prefix and would 404 on a missing 'tracks' file. POST /audio still
+    works because StaticFiles only routes GET.
+    """
     return list_audio_tracks()
 
 

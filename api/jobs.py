@@ -304,13 +304,23 @@ def _render_slot_pipeline(
     slot_id: str,
     plan: AssignmentPlan,
     template: Template,
-    generative_video_model: str = DEFAULT_GENERATIVE_VIDEO_MODEL,
+    image_model: str | None = None,
+    generative_video_model: str | None = None,
     video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
     progress: Callable[[str, int, str, dict | None], None] | None = None,
 ) -> _SlotRenderResult:
     """Render one slot end-to-end. Internal helper shared by `run_slot_job`
     and `run_template_job`. Surfaces stage transitions through `progress`
-    (status, percent, message, extra-fields-dict)."""
+    (status, percent, message, extra-fields-dict).
+
+    Model overrides:
+      • image_model: when set, every image pass uses this fal id instead
+        of the per-pass template default. None → template default per pass.
+      • generative_video_model: when set, EVERY slot uses this video model
+        regardless of strategy (overrides DepthFlow presets too). When None,
+        Kling 3.0 Pro is used for keyframe-interpolation slots and the
+        slot's template-defined model is used otherwise.
+    """
 
     def _emit(status: str, pct: int, msg: str, extra: dict | None = None) -> None:
         if progress is not None:
@@ -357,6 +367,7 @@ def _render_slot_pipeline(
         output_root=str(primary_dir),
         template_id=template_id,
         with_logs=False,
+        model_override=image_model,
         reference_photos_override=assignment.additional_reference_photo_paths,
     )
     start_frame_path = primary_result.final_output_path
@@ -411,6 +422,9 @@ def _render_slot_pipeline(
     video_dir = out_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
     if end_frame_path:
+        # Keyframe-interpolation path. User override wins; otherwise use the
+        # default generative model (Kling 3.0 Pro).
+        video_model_id = generative_video_model or DEFAULT_GENERATIVE_VIDEO_MODEL
         video_result = run_video_pass(
             input_image_path=start_frame_path,
             video_pass_spec=slot.video_pass.model_copy(
@@ -433,12 +447,15 @@ def _render_slot_pipeline(
             run_id=run_id,
             end_frame_image_path=end_frame_path,
             with_logs=False,
-            model_override=generative_video_model,
+            model_override=video_model_id,
             duration_override=video_duration,
             overscan_pct=0.0,
         )
-        model_used = generative_video_model
+        model_used = video_model_id
     else:
+        # No-end-frame path: typically a DepthFlow preset. If the user
+        # explicitly picked a video model in the UI, force-override the
+        # template's per-slot model so their choice applies everywhere.
         video_result = run_video_pass(
             input_image_path=start_frame_path,
             video_pass_spec=slot.video_pass,
@@ -447,9 +464,10 @@ def _render_slot_pipeline(
             template_id=template_id,
             run_id=run_id,
             with_logs=False,
+            model_override=generative_video_model,
             duration_override=video_duration,
         )
-        model_used = slot.video_pass.model
+        model_used = generative_video_model or slot.video_pass.model
 
     # ─── Summary write ──────────────────────────────────────────────
     summary = {
@@ -492,7 +510,8 @@ def run_slot_job(
     project_slug: str,
     template_id: str,
     slot_id: str,
-    generative_video_model: str = DEFAULT_GENERATIVE_VIDEO_MODEL,
+    image_model: str | None = None,
+    generative_video_model: str | None = None,
     video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
 ) -> None:
     """Synchronous worker that runs one slot end-to-end and threads progress
@@ -525,6 +544,7 @@ def run_slot_job(
             slot_id=slot_id,
             plan=plan,
             template=template,
+            image_model=image_model,
             generative_video_model=generative_video_model,
             video_duration=video_duration,
             progress=_progress,
@@ -755,13 +775,61 @@ def _ffmpeg_extract_thumbnail(*, source_video: Path, output_image: Path) -> None
         print(f"[thumbnail] failed: {proc.stderr[-500:]}")
 
 
+def _persist_inline_slot_render(
+    *,
+    project_slug: str,
+    template_id: str,
+    slot_id: str,
+    started_at: str,
+    result: _SlotRenderResult,
+) -> None:
+    """Write a synthesized JobRecord with kind="run-slot" and status="done"
+    for a slot that was rendered inline by run_template_job.
+
+    Without this, only slots the user explicitly clicked through the slot
+    strip would get a per-slot job file under outputs/jobs/. Slots rendered
+    as part of a walkthrough export would have their video on disk but no
+    JobRecord pointing at it, so the next walkthrough export would
+    re-render them from scratch — exactly the bug Aaron observed where
+    Export Video re-ran slots 7-12 even though they had completed in the
+    prior template run.
+
+    By persisting a per-slot record here, list_slot_results() finds these
+    on subsequent exports and reuses the videos."""
+    record = JobRecord(
+        id=uuid.uuid4().hex,
+        kind="run-slot",
+        project_slug=project_slug,
+        template_id=template_id,
+        slot_id=slot_id,
+        status="done",
+        percent=100,
+        message="Rendered inline as part of walkthrough export",
+        started_at=started_at,
+        finished_at=_now_iso(),
+        run_dir=result.out_dir,
+        summary_path=_to_url(result.summary_path),
+        start_frame_url=_to_url(result.start_frame_path),
+        end_frame_url=_to_url(result.end_frame_path) if result.end_frame_path else None,
+        video_url=_to_url(result.video_clip_path),
+        primary_photo_path=result.primary_photo_path,
+        end_frame_photo_path=result.end_frame_photo_path,
+        reference_paths=list(result.reference_paths),
+        strategy=result.strategy,
+        model_used=result.model_used,
+    )
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    _job_path(record.id).write_text(record.model_dump_json(indent=2))
+
+
 def run_template_job(
     job_id: str,
     *,
     project_slug: str,
     template_id: str,
     audio_track: str | None = None,
-    generative_video_model: str = DEFAULT_GENERATIVE_VIDEO_MODEL,
+    image_model: str | None = None,
+    generative_video_model: str | None = None,
     video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
 ) -> None:
     """Render every active slot in template order and concat the results
@@ -838,12 +906,14 @@ def run_template_job(
                     **(extra or {}),
                 )
 
+            slot_started_at = _now_iso()
             result = _render_slot_pipeline(
                 project_slug=project_slug,
                 template_id=template_id,
                 slot_id=slot.id,
                 plan=plan,
                 template=template,
+                image_model=image_model,
                 generative_video_model=generative_video_model,
                 video_duration=video_duration,
                 progress=_progress,
@@ -852,6 +922,16 @@ def run_template_job(
             url = _to_url(result.video_clip_path)
             if url:
                 slot_video_urls.append(url)
+
+            # Persist this inline render as a discoverable run-slot JobRecord
+            # so the NEXT walkthrough export reuses it instead of re-running.
+            _persist_inline_slot_render(
+                project_slug=project_slug,
+                template_id=template_id,
+                slot_id=slot.id,
+                started_at=slot_started_at,
+                result=result,
+            )
             base_pct += per_slot_pct
 
         # ─── Concat ───────────────────────────────────────────────────

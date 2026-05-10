@@ -5,18 +5,22 @@ import { useEffect, useRef, useState } from "react";
 import {
   AudioTrack,
   ExportManifest,
+  ImageModelInfo,
   JobRecord,
+  ModelRegistry,
   Photo,
   PlanSlotAssignment,
   ProjectPlan,
   SlotDefinition,
   TemplateFull,
   TemplateSummary,
+  VideoModelInfo,
   backendURL,
   classifyProject,
   createProject,
   fetchAudioTracks,
   fetchExports,
+  fetchModels,
   fetchProjectPlan,
   fetchSlotResults,
   runSlot,
@@ -104,6 +108,14 @@ export default function StudioWorkspace({
   const [audioUploading, setAudioUploading] = useState(false);
   const [activeRightTab, setActiveRightTab] = useState<RightTab>("info");
 
+  // Image + video model registries fetched once on mount, plus the active
+  // override selections. null = "Template default" — defer to whatever the
+  // template specifies per pass / per slot. A non-null value forces every
+  // image pass (or every slot's video pass) to use that model.
+  const [modelRegistry, setModelRegistry] = useState<ModelRegistry | null>(null);
+  const [selectedImageModel, setSelectedImageModel] = useState<string | null>(null);
+  const [selectedVideoModel, setSelectedVideoModel] = useState<string | null>(null);
+
   // On project / template change: reset state, seed slot jobs from any
   // previously-completed runs (so videos persist across navigations), try
   // to load cached plan, and kick off classify if no cache exists. Also
@@ -181,15 +193,45 @@ export default function StudioWorkspace({
     };
   }, []);
 
-  // When a template (run-template) job lands, refresh the Exports list and
-  // promote the new export to the player so the user immediately sees the
-  // result they just generated.
+  // Model registries: fetch once on mount.
+  useEffect(() => {
+    let cancelled = false;
+    fetchModels()
+      .then((reg) => {
+        if (!cancelled) setModelRegistry(reg);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // When a template (run-template) job lands, refresh both the Exports list
+  // AND the slot-results map. The latter is critical: slots rendered inline
+  // by the template job get persisted as new run-slot JobRecords on the
+  // backend, and re-fetching here surfaces their checkmarks on the timeline
+  // strip without needing a remount. Then promote the new export to the
+  // player so the user immediately sees the result.
   useEffect(() => {
     if (
       templateJob?.status === "done" &&
       selectedProjectSlug &&
       templateSummary.enabled
     ) {
+      // Refresh slot strip with newly-persisted inline renders.
+      fetchSlotResults(selectedProjectSlug, template.template.id)
+        .then((slotResults) => {
+          setSlotJobs((prev) => {
+            const next = { ...prev };
+            for (const [slotId, job] of Object.entries(slotResults)) {
+              next[slotId] = job.id;
+            }
+            return next;
+          });
+        })
+        .catch(() => undefined);
+
+      // Refresh exports list and play the new walkthrough.
       fetchExports(selectedProjectSlug, template.template.id)
         .then((list) => {
           setExports(list);
@@ -274,6 +316,8 @@ export default function StudioWorkspace({
         project_slug: selectedProjectSlug,
         template_id: template.template.id,
         slot_id: slot.id,
+        image_model: selectedImageModel,
+        generative_video_model: selectedVideoModel,
       });
       setSlotJobs((prev) => ({ ...prev, [slot.id]: job.id }));
     } catch (err) {
@@ -326,6 +370,8 @@ export default function StudioWorkspace({
         project_slug: selectedProjectSlug,
         template_id: template.template.id,
         audio_track: selectedAudio,
+        image_model: selectedImageModel,
+        generative_video_model: selectedVideoModel,
       });
       setTemplateJobId(job.id);
       setActiveRightTab("exports");
@@ -353,6 +399,8 @@ export default function StudioWorkspace({
     selectedProjectSlug,
     template.template.id,
     selectedAudio,
+    selectedImageModel,
+    selectedVideoModel,
     canExport,
   ]);
 
@@ -483,6 +531,11 @@ export default function StudioWorkspace({
         templateJob={templateJob}
         playerSource={playerSource}
         onSelectExport={handleSelectExport}
+        modelRegistry={modelRegistry}
+        selectedImageModel={selectedImageModel}
+        selectedVideoModel={selectedVideoModel}
+        onSelectImageModel={setSelectedImageModel}
+        onSelectVideoModel={setSelectedVideoModel}
       />
     </main>
   );
@@ -1256,6 +1309,11 @@ function RightPanel({
   templateJob,
   playerSource,
   onSelectExport,
+  modelRegistry,
+  selectedImageModel,
+  selectedVideoModel,
+  onSelectImageModel,
+  onSelectVideoModel,
 }: {
   template: TemplateFull;
   slotJobs: Record<string, string>;
@@ -1273,6 +1331,11 @@ function RightPanel({
   templateJob: JobRecord | null;
   playerSource: PlayerSource;
   onSelectExport: (manifest: ExportManifest) => void;
+  modelRegistry: ModelRegistry | null;
+  selectedImageModel: string | null;
+  selectedVideoModel: string | null;
+  onSelectImageModel: (id: string | null) => void;
+  onSelectVideoModel: (id: string | null) => void;
 }) {
   const selectedJobId = selectedSlotId ? slotJobs[selectedSlotId] ?? null : null;
   const { job } = useJob(selectedJobId);
@@ -1302,17 +1365,26 @@ function RightPanel({
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-auto p-3 text-sm">
         {activeTab === "info" ? (
-          selectedSlotId && job ? (
-            <SelectedSlotDetails
-              template={template}
-              job={job}
-              slotId={selectedSlotId}
-              onPreviewImage={onPreviewImage}
-              onRegenerateSlot={onRegenerateSlot}
+          <>
+            <ModelPicker
+              registry={modelRegistry}
+              selectedImage={selectedImageModel}
+              selectedVideo={selectedVideoModel}
+              onSelectImage={onSelectImageModel}
+              onSelectVideo={onSelectVideoModel}
             />
-          ) : (
-            <TemplateDetails template={template} />
-          )
+            {selectedSlotId && job ? (
+              <SelectedSlotDetails
+                template={template}
+                job={job}
+                slotId={selectedSlotId}
+                onPreviewImage={onPreviewImage}
+                onRegenerateSlot={onRegenerateSlot}
+              />
+            ) : (
+              <TemplateDetails template={template} />
+            )}
+          </>
         ) : activeTab === "audio" ? (
           <AudioTabPanel
             tracks={audioTracks}
@@ -1333,6 +1405,124 @@ function RightPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+/* ─── Model picker (lives at the top of the Info tab) ──────────────────── */
+
+function ModelPicker({
+  registry,
+  selectedImage,
+  selectedVideo,
+  onSelectImage,
+  onSelectVideo,
+}: {
+  registry: ModelRegistry | null;
+  selectedImage: string | null;
+  selectedVideo: string | null;
+  onSelectImage: (id: string | null) => void;
+  onSelectVideo: (id: string | null) => void;
+}) {
+  if (!registry) {
+    return (
+      <p className="mb-4 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-500">
+        Loading model registry…
+      </p>
+    );
+  }
+  const imageInfo: ImageModelInfo | undefined = selectedImage
+    ? registry.image_models.find((m) => m.id === selectedImage)
+    : undefined;
+  const videoInfo: VideoModelInfo | undefined = selectedVideo
+    ? registry.video_models.find((m) => m.id === selectedVideo)
+    : undefined;
+  return (
+    <div className="mb-4 space-y-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
+      <div>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Image model
+          </p>
+          {selectedImage && (
+            <button
+              onClick={() => onSelectImage(null)}
+              className="text-[10px] text-neutral-500 hover:text-neutral-300"
+              title="Reset to template default"
+            >
+              clear
+            </button>
+          )}
+        </div>
+        <select
+          value={selectedImage ?? ""}
+          onChange={(e) => onSelectImage(e.target.value || null)}
+          className="w-full cursor-pointer rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100 transition hover:border-neutral-500 focus:border-blue-700 focus:outline-none"
+        >
+          <option value="">Template default (per-pass)</option>
+          {registry.image_models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        {imageInfo && (
+          <p className="mt-1 line-clamp-3 text-[11px] leading-snug text-neutral-500">
+            {imageInfo.notes}
+          </p>
+        )}
+      </div>
+      <div>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Video model
+          </p>
+          {selectedVideo && (
+            <button
+              onClick={() => onSelectVideo(null)}
+              className="text-[10px] text-neutral-500 hover:text-neutral-300"
+              title="Reset to template default"
+            >
+              clear
+            </button>
+          )}
+        </div>
+        <select
+          value={selectedVideo ?? ""}
+          onChange={(e) => onSelectVideo(e.target.value || null)}
+          className="w-full cursor-pointer rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100 transition hover:border-neutral-500 focus:border-blue-700 focus:outline-none"
+        >
+          <option value="">Template default (per-slot)</option>
+          <optgroup label="Generative (fal)">
+            {registry.video_models
+              .filter((m) => m.backend === "fal")
+              .map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                  {m.cost_per_sec > 0 ? ` · $${m.cost_per_sec.toFixed(2)}/s` : ""}
+                </option>
+              ))}
+          </optgroup>
+          <optgroup label="Local (DepthFlow)">
+            {registry.video_models
+              .filter((m) => m.backend === "local")
+              .map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+          </optgroup>
+        </select>
+        {videoInfo && (
+          <p className="mt-1 line-clamp-3 text-[11px] leading-snug text-neutral-500">
+            {videoInfo.notes}
+          </p>
+        )}
+      </div>
+      <p className="text-[10px] text-neutral-600">
+        Active selection applies to the next slot run, regenerate, and full
+        walkthrough.
+      </p>
+    </div>
   );
 }
 

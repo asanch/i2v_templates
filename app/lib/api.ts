@@ -161,7 +161,8 @@ export type RunSlotRequest = {
   project_slug: string;
   template_id: string;
   slot_id: string;
-  generative_video_model?: string;
+  image_model?: string | null;
+  generative_video_model?: string | null;
   video_duration?: number;
 };
 
@@ -311,7 +312,8 @@ export type RunTemplateRequest = {
   project_slug: string;
   template_id: string;
   audio_track?: string | null;
-  generative_video_model?: string;
+  image_model?: string | null;
+  generative_video_model?: string | null;
   video_duration?: number;
 };
 
@@ -331,7 +333,9 @@ export async function runTemplate(req: RunTemplateRequest): Promise<JobRecord> {
 }
 
 export async function fetchAudioTracks(): Promise<AudioTrack[]> {
-  return fetchJSON<AudioTrack[]>("/audio/tracks");
+  // Hyphenated path because the backend mounts /audio/ as static files;
+  // /audio/tracks would be intercepted by that mount and 404.
+  return fetchJSON<AudioTrack[]>("/audio-tracks");
 }
 
 export async function uploadAudioTracks(
@@ -354,5 +358,41 @@ export async function fetchExports(
   return fetchJSON<ExportManifest[]>(
     `/projects/${encodeURIComponent(project_slug)}/exports?template_id=${encodeURIComponent(template_id)}`,
   );
+}
+
+
+// ─── Model registries ───────────────────────────────────────────────────────
+
+
+export type ImageModelInfo = {
+  id: string;
+  label: string;
+  notes: string;
+  default_for: string[];
+};
+
+export type VideoModelInfo = {
+  id: string;
+  label: string;
+  notes: string;
+  backend: "fal" | "local";
+  supports_end_frame: boolean;
+  min_duration: number;
+  max_duration: number;
+  allowed_durations: number[] | null;
+  cost_per_sec: number;
+};
+
+export type ModelRegistry = {
+  image_models: ImageModelInfo[];
+  video_models: VideoModelInfo[];
+  defaults: {
+    generative_video_model: string;
+    video_duration_sec: number;
+  };
+};
+
+export async function fetchModels(): Promise<ModelRegistry> {
+  return fetchJSON<ModelRegistry>("/models");
 }
 
