@@ -239,3 +239,9 @@ app/.env.*.local
 app/next-env.d.ts
 app/tsconfig.tsbuildinfo
 app/*.tsbuildinfo
+
+# Override the Python-venv `lib/` rule near the top of this file —
+# app/lib/ is the Next.js TS source dir (api.ts, useJob.ts, etc.) and
+# MUST be tracked. Without these negations git ignores it globally.
+!app/lib/
+!app/lib/**
