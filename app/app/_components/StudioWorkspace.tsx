@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
+  AudioTrack,
+  ExportManifest,
   JobRecord,
   Photo,
   PlanSlotAssignment,
@@ -13,9 +15,13 @@ import {
   backendURL,
   classifyProject,
   createProject,
+  fetchAudioTracks,
+  fetchExports,
   fetchProjectPlan,
   fetchSlotResults,
   runSlot,
+  runTemplate,
+  uploadAudioTracks,
   uploadPhotos,
 } from "@/lib/api";
 import { useJob } from "@/lib/useJob";
@@ -29,13 +35,23 @@ type Props = {
   onBackToProjects: () => void;
   onPhotosChanged: () => void;
   onProjectCreated: (slug: string) => void;
+  /** Imperative ref the TopNav's Export Video button calls into. We poke
+   *  this ref on mount so the button has a handler bound to live state. */
+  exportTriggerRef?: React.MutableRefObject<(() => void) | null>;
+  /** Whether the export trigger should be enabled. Mirrors the bottom-bar
+   *  button's enable rule and is reported up so TopNav can disable its
+   *  Export Video button when the project isn't ready. */
+  setCanExport?: (canExport: boolean) => void;
 };
 
 /** What the center video/image area is currently displaying. */
 type PlayerSource =
   | { kind: "slot"; slotId: string }
   | { kind: "image"; url: string; label: string }
+  | { kind: "export"; exportId: string; url: string; label: string }
   | null;
+
+type RightTab = "info" | "audio" | "exports";
 
 /**
  * Three-pane studio. No page scroll; only the photos panel scrolls
@@ -55,11 +71,13 @@ export default function StudioWorkspace({
   onBackToProjects,
   onPhotosChanged,
   onProjectCreated,
+  exportTriggerRef,
+  setCanExport,
 }: Props) {
   const [slotJobs, setSlotJobs] = useState<Record<string, string>>({});
   // playerSource drives what's in the center video/image area: a slot's
   // job (in progress / done video), an image preview from the photos panel
-  // or right-pane frames, or nothing.
+  // or right-pane frames, an exported walkthrough mp4, or nothing.
   const [playerSource, setPlayerSource] = useState<PlayerSource>(null);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -74,15 +92,30 @@ export default function StudioWorkspace({
   const [classifyJobId, setClassifyJobId] = useState<string | null>(null);
   const { job: classifyJob } = useJob(classifyJobId);
 
+  // Walkthrough export state. `templateJobId` is the in-flight kind="run-template"
+  // job; `exports` is every prior completed manifest for this project + template
+  // (newest first). Audio tracks are fetched once on mount; the user picks one
+  // in the Audio tab and it gets bound to the next export.
+  const [templateJobId, setTemplateJobId] = useState<string | null>(null);
+  const { job: templateJob } = useJob(templateJobId);
+  const [exports, setExports] = useState<ExportManifest[]>([]);
+  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
+  const [selectedAudio, setSelectedAudio] = useState<string | null>(null);
+  const [audioUploading, setAudioUploading] = useState(false);
+  const [activeRightTab, setActiveRightTab] = useState<RightTab>("info");
+
   // On project / template change: reset state, seed slot jobs from any
   // previously-completed runs (so videos persist across navigations), try
-  // to load cached plan, and kick off classify if no cache exists.
+  // to load cached plan, and kick off classify if no cache exists. Also
+  // hydrates the Exports tab with prior walkthroughs.
   useEffect(() => {
     setSlotJobs({});
     setPlayerSource(null);
     setStartError(null);
     setPlan(null);
     setClassifyJobId(null);
+    setTemplateJobId(null);
+    setExports([]);
 
     if (!selectedProjectSlug || !templateSummary.enabled) return;
     let cancelled = false;
@@ -101,7 +134,15 @@ export default function StudioWorkspace({
         }
         if (Object.keys(seed).length > 0) setSlotJobs(seed);
 
-        // 2. Look up cached plan; if none, fire classification.
+        // 2. Hydrate prior exports for the Exports tab.
+        const priorExports = await fetchExports(
+          selectedProjectSlug,
+          template.template.id,
+        );
+        if (cancelled) return;
+        setExports(priorExports);
+
+        // 3. Look up cached plan; if none, fire classification.
         const cached = await fetchProjectPlan(
           selectedProjectSlug,
           template.template.id,
@@ -125,6 +166,52 @@ export default function StudioWorkspace({
       cancelled = true;
     };
   }, [selectedProjectSlug, template.template.id, templateSummary.enabled]);
+
+  // Audio tracks: fetch once on mount, refresh after every upload. Survives
+  // project/template switches because tracks live at /audio/ globally.
+  useEffect(() => {
+    let cancelled = false;
+    fetchAudioTracks()
+      .then((tracks) => {
+        if (!cancelled) setAudioTracks(tracks);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // When a template (run-template) job lands, refresh the Exports list and
+  // promote the new export to the player so the user immediately sees the
+  // result they just generated.
+  useEffect(() => {
+    if (
+      templateJob?.status === "done" &&
+      selectedProjectSlug &&
+      templateSummary.enabled
+    ) {
+      fetchExports(selectedProjectSlug, template.template.id)
+        .then((list) => {
+          setExports(list);
+          if (list.length > 0) {
+            const latest = list[0];
+            setPlayerSource({
+              kind: "export",
+              exportId: latest.export_id,
+              url: backendURL(latest.video_url),
+              label: formatExportLabel(latest.finished_at),
+            });
+            setActiveRightTab("exports");
+          }
+        })
+        .catch(() => undefined);
+    }
+  }, [
+    templateJob?.status,
+    selectedProjectSlug,
+    template.template.id,
+    templateSummary.enabled,
+  ]);
 
   // When the classify job lands, re-fetch the plan.
   useEffect(() => {
@@ -160,12 +247,11 @@ export default function StudioWorkspace({
     setPlayerSource({ kind: "image", url, label });
   };
 
-  // Click handler: selects the slot for the player; if no job has been
-  // kicked off for this slot yet, start one.
-  const handleSlotClick = async (slot: SlotDefinition) => {
-    setPlayerSource({ kind: "slot", slotId: slot.id });
-    if (slotJobs[slot.id]) return; // already running or done
-
+  /** Shared kickoff: validates project + template state, then fires
+   *  POST /jobs/run-slot. Used both by first-time slot clicks and by the
+   *  Regenerate button in the Info tab. The caller is responsible for
+   *  clearing slotJobs[slot.id] beforehand if a re-render is desired. */
+  const startSlotJob = async (slot: SlotDefinition): Promise<void> => {
     if (!selectedProjectSlug) {
       setStartError(
         "Pick a project before generating — slots need photos to run."
@@ -176,15 +262,12 @@ export default function StudioWorkspace({
       setStartError("This template is a stub; generation is disabled.");
       return;
     }
-    // Don't fire a slot run while classification is still in flight — the
-    // worker would just block on the plan lock and confuse the UI.
     if (isClassifying) {
       setStartError(
         "Classifying photos first — give it a few seconds and try again."
       );
       return;
     }
-
     try {
       setStartError(null);
       const job = await runSlot({
@@ -195,6 +278,116 @@ export default function StudioWorkspace({
       setSlotJobs((prev) => ({ ...prev, [slot.id]: job.id }));
     } catch (err) {
       setStartError(String(err));
+    }
+  };
+
+  /** Force a fresh render of a slot whose job is done or errored. The prior
+   *  run stays on disk; list_slot_results picks the newest finished_at, so
+   *  the next walkthrough export will use this new render. */
+  const handleRegenerateSlot = async (slot: SlotDefinition) => {
+    setPlayerSource({ kind: "slot", slotId: slot.id });
+    setSlotJobs((prev) => {
+      const next = { ...prev };
+      delete next[slot.id];
+      return next;
+    });
+    await startSlotJob(slot);
+  };
+
+  // Click handler: selects the slot for the player; if no job has been
+  // kicked off for this slot yet, start one. Re-clicking a slot that's
+  // already running or done is a no-op (use Regenerate in the Info tab to
+  // force a re-render).
+  const handleSlotClick = async (slot: SlotDefinition) => {
+    setPlayerSource({ kind: "slot", slotId: slot.id });
+    if (slotJobs[slot.id]) return;
+    await startSlotJob(slot);
+  };
+
+  // Whether the export trigger should be enabled. Mirrors the bottom-bar
+  // button's enable rule. Reported up via setCanExport so the TopNav
+  // Export Video button stays in lockstep.
+  const exportInFlight =
+    templateJob !== null &&
+    templateJob.status !== "done" &&
+    templateJob.status !== "error";
+  const canExport =
+    templateSummary.enabled &&
+    !!selectedProjectSlug &&
+    photos.length > 0 &&
+    !isClassifying &&
+    !exportInFlight;
+
+  const handleRunTemplate = async () => {
+    if (!canExport || !selectedProjectSlug) return;
+    setStartError(null);
+    try {
+      const job = await runTemplate({
+        project_slug: selectedProjectSlug,
+        template_id: template.template.id,
+        audio_track: selectedAudio,
+      });
+      setTemplateJobId(job.id);
+      setActiveRightTab("exports");
+      // Clear any prior playerSource so the player area visibly switches to
+      // the export-progress card instead of holding the previous slot.
+      setPlayerSource(null);
+    } catch (err) {
+      setStartError(`Walkthrough failed to start: ${err}`);
+    }
+  };
+
+  // Imperatively register the handler with the parent so TopNav's Export
+  // Video button can call it. Re-register whenever inputs change so the
+  // closure always sees current state.
+  useEffect(() => {
+    if (!exportTriggerRef) return;
+    exportTriggerRef.current = handleRunTemplate;
+    return () => {
+      if (exportTriggerRef.current === handleRunTemplate) {
+        exportTriggerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    selectedProjectSlug,
+    template.template.id,
+    selectedAudio,
+    canExport,
+  ]);
+
+  // Mirror the export-readiness up to the page so TopNav can disable the
+  // Export Video button in lockstep with the bottom-bar one.
+  useEffect(() => {
+    setCanExport?.(canExport);
+  }, [canExport, setCanExport]);
+
+  const handleSelectExport = (manifest: ExportManifest) => {
+    setPlayerSource({
+      kind: "export",
+      exportId: manifest.export_id,
+      url: backendURL(manifest.video_url),
+      label: formatExportLabel(manifest.finished_at),
+    });
+  };
+
+  const handleUploadAudioFiles = async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
+    setAudioUploading(true);
+    setStartError(null);
+    try {
+      await uploadAudioTracks(arr);
+      const refreshed = await fetchAudioTracks();
+      setAudioTracks(refreshed);
+      // Auto-select the most recently uploaded track for convenience.
+      const newest = arr[arr.length - 1].name;
+      const match = refreshed.find((t) => t.filename.includes(newest.split(".")[0]));
+      if (match) setSelectedAudio(match.filename);
+    } catch (err) {
+      setStartError(`Audio upload failed: ${err}`);
+    } finally {
+      setAudioUploading(false);
     }
   };
 
@@ -269,15 +462,47 @@ export default function StudioWorkspace({
         startError={startError}
         assignmentBySlot={assignmentBySlot}
         classifyJob={classifyJob}
+        templateJob={templateJob}
+        canExport={canExport}
+        onRunTemplate={handleRunTemplate}
       />
       <RightPanel
         template={template}
         slotJobs={slotJobs}
         selectedSlotId={selectedSlotId}
         onPreviewImage={handlePreviewImage}
+        onRegenerateSlot={handleRegenerateSlot}
+        activeTab={activeRightTab}
+        onTabChange={setActiveRightTab}
+        audioTracks={audioTracks}
+        selectedAudio={selectedAudio}
+        onSelectAudio={setSelectedAudio}
+        onUploadAudio={handleUploadAudioFiles}
+        audioUploading={audioUploading}
+        exports={exports}
+        templateJob={templateJob}
+        playerSource={playerSource}
+        onSelectExport={handleSelectExport}
       />
     </main>
   );
+}
+
+/** Format a manifest's finished_at into a human-friendly export label.
+ *  Aaron asked for "each export can have a timestamp for now". */
+function formatExportLabel(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
 }
 
 /* ─── Photos panel ──────────────────────────────────────────────────────── */
@@ -393,6 +618,9 @@ function CenterPanel({
   startError,
   assignmentBySlot,
   classifyJob,
+  templateJob,
+  canExport,
+  onRunTemplate,
 }: {
   template: TemplateFull;
   templateSummary: TemplateSummary;
@@ -405,6 +633,9 @@ function CenterPanel({
   startError: string | null;
   assignmentBySlot: Record<string, PlanSlotAssignment>;
   classifyJob: JobRecord | null;
+  templateJob: JobRecord | null;
+  canExport: boolean;
+  onRunTemplate: () => void;
 }) {
   const slots = template.slots;
   const enabled = templateSummary.enabled;
@@ -464,6 +695,7 @@ function CenterPanel({
         slotsCount={slots.length}
         enabled={enabled}
         startError={startError}
+        templateJob={templateJob}
       />
 
       {classifyJob && classifyJob.status !== "done" && (
@@ -488,6 +720,28 @@ function CenterPanel({
         </div>
       )}
 
+      {templateJob && templateJob.status !== "done" && (
+        <div className="flex shrink-0 items-center gap-3 rounded-xl border border-emerald-900/60 bg-emerald-950/30 px-4 py-2 text-xs text-emerald-200">
+          {templateJob.status === "error" ? (
+            <span className="text-red-300">
+              Walkthrough failed: {templateJob.error}
+            </span>
+          ) : (
+            <>
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-500/30 border-t-emerald-300" />
+              <span className="truncate">{templateJob.message}</span>
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-emerald-950">
+                <div
+                  className="h-full bg-emerald-400 transition-[width]"
+                  style={{ width: `${templateJob.percent}%` }}
+                />
+              </div>
+              <span className="font-mono text-[11px]">{templateJob.percent}%</span>
+            </>
+          )}
+        </div>
+      )}
+
       <SlotStrip
         slots={slots}
         photos={photos}
@@ -499,19 +753,24 @@ function CenterPanel({
 
       <div className="flex shrink-0 items-center gap-3 rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-3">
         <button
+          onClick={onRunTemplate}
           className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!enabled || photos.length === 0}
+          disabled={!canExport}
           title={
             !enabled
               ? "This template is a stub"
               : photos.length === 0
                 ? "Add images to this project first"
-                : "Run the full walkthrough (concat coming next)"
+                : templateJob && templateJob.status !== "done" && templateJob.status !== "error"
+                  ? "Walkthrough already in progress"
+                  : "Render every active slot, concat into one mp4, optionally mux audio"
           }
         >
           {isNewProject || photos.length === 0
             ? "Add images first"
-            : "Generate full walkthrough"}
+            : templateJob && templateJob.status !== "done" && templateJob.status !== "error"
+              ? "Generating walkthrough…"
+              : "Generate full walkthrough"}
         </button>
       </div>
     </section>
@@ -529,6 +788,7 @@ function PlayerArea({
   slotsCount,
   enabled,
   startError,
+  templateJob,
 }: {
   playerSource: PlayerSource;
   selectedSlot: SlotDefinition | null;
@@ -538,18 +798,36 @@ function PlayerArea({
   slotsCount: number;
   enabled: boolean;
   startError: string | null;
+  templateJob: JobRecord | null;
 }) {
   const { job } = useJob(selectedSlotJobId);
 
   const isImagePreview = playerSource?.kind === "image";
-  const hasVideo = !isImagePreview && job?.status === "done" && job.video_url;
+  const isExportPlayback = playerSource?.kind === "export";
+  const hasVideo =
+    !isImagePreview &&
+    !isExportPlayback &&
+    job?.status === "done" &&
+    job.video_url;
+  const showTemplateProgress =
+    !isImagePreview &&
+    !isExportPlayback &&
+    !hasVideo &&
+    !selectedSlot &&
+    templateJob !== null &&
+    templateJob.status !== "done" &&
+    templateJob.status !== "error";
 
   // Top-right badge label.
   const badge = isImagePreview
     ? "Image"
-    : hasVideo
-      ? "Rendered"
-      : "Preview";
+    : isExportPlayback
+      ? "Walkthrough"
+      : hasVideo
+        ? "Rendered"
+        : showTemplateProgress
+          ? "Rendering"
+          : "Preview";
 
   return (
     <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-neutral-800 bg-black">
@@ -559,6 +837,15 @@ function PlayerArea({
           key={playerSource.url}
           src={playerSource.url}
           alt={playerSource.label}
+          className="h-full w-full object-contain"
+        />
+      ) : isExportPlayback ? (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <video
+          key={playerSource.url}
+          src={playerSource.url}
+          controls
+          autoPlay
           className="h-full w-full object-contain"
         />
       ) : hasVideo ? (
@@ -571,6 +858,8 @@ function PlayerArea({
           loop
           className="h-full w-full object-contain"
         />
+      ) : showTemplateProgress ? (
+        <TemplateJobOverlay job={templateJob!} />
       ) : selectedSlot ? (
         <SlotJobOverlay slot={selectedSlot} job={job} photos={photos} />
       ) : (
@@ -585,11 +874,32 @@ function PlayerArea({
       <span className="absolute right-3 top-3 rounded-full bg-black/60 px-2 py-1 text-xs text-neutral-300 backdrop-blur-sm">
         {badge}
       </span>
-      {isImagePreview && (
+      {(isImagePreview || isExportPlayback) && (
         <span className="absolute left-3 top-3 max-w-[60%] truncate rounded-full bg-black/60 px-2 py-1 text-xs text-neutral-300 backdrop-blur-sm">
           {playerSource.label}
         </span>
       )}
+    </div>
+  );
+}
+
+/** Big center-stage progress card while a run-template job is in flight and
+ *  no other player source has been picked. Mirrors SlotJobOverlay's vibe. */
+function TemplateJobOverlay({ job }: { job: JobRecord }) {
+  return (
+    <div className="flex flex-col items-center gap-3 px-6 text-center text-neutral-500">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-900/40 ring-1 ring-emerald-700/60">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-emerald-500/30 border-t-emerald-300" />
+      </div>
+      <p className="text-sm font-medium text-neutral-100">Rendering walkthrough</p>
+      <p className="max-w-md text-xs">{job.message}</p>
+      <div className="h-1.5 w-64 overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className="h-full bg-emerald-500 transition-[width] duration-500"
+          style={{ width: `${job.percent}%` }}
+        />
+      </div>
+      <p className="font-mono text-[10px] text-neutral-500">{job.percent}%</p>
     </div>
   );
 }
@@ -934,11 +1244,35 @@ function RightPanel({
   slotJobs,
   selectedSlotId,
   onPreviewImage,
+  onRegenerateSlot,
+  activeTab,
+  onTabChange,
+  audioTracks,
+  selectedAudio,
+  onSelectAudio,
+  onUploadAudio,
+  audioUploading,
+  exports,
+  templateJob,
+  playerSource,
+  onSelectExport,
 }: {
   template: TemplateFull;
   slotJobs: Record<string, string>;
   selectedSlotId: string | null;
   onPreviewImage: (url: string, label: string) => void;
+  onRegenerateSlot: (slot: SlotDefinition) => void;
+  activeTab: RightTab;
+  onTabChange: (tab: RightTab) => void;
+  audioTracks: AudioTrack[];
+  selectedAudio: string | null;
+  onSelectAudio: (filename: string | null) => void;
+  onUploadAudio: (files: FileList | File[]) => void;
+  audioUploading: boolean;
+  exports: ExportManifest[];
+  templateJob: JobRecord | null;
+  playerSource: PlayerSource;
+  onSelectExport: (manifest: ExportManifest) => void;
 }) {
   const selectedJobId = selectedSlotId ? slotJobs[selectedSlotId] ?? null : null;
   const { job } = useJob(selectedJobId);
@@ -947,25 +1281,308 @@ function RightPanel({
     <aside className="flex min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900">
       <div className="shrink-0 border-b border-neutral-800 px-4 py-3">
         <div className="flex gap-1 rounded-lg bg-neutral-950 p-1 text-xs">
-          <span className="rounded-md bg-neutral-800 px-3 py-1 text-neutral-100">History</span>
-          <span className="px-3 py-1 text-neutral-500">Presets</span>
-          <span className="px-3 py-1 text-neutral-500">Effects</span>
+          <RightTabButton
+            label="Info"
+            active={activeTab === "info"}
+            onClick={() => onTabChange("info")}
+          />
+          <RightTabButton
+            label="Audio"
+            active={activeTab === "audio"}
+            onClick={() => onTabChange("audio")}
+            badge={selectedAudio ? "•" : undefined}
+          />
+          <RightTabButton
+            label="Exports"
+            active={activeTab === "exports"}
+            onClick={() => onTabChange("exports")}
+            badge={exports.length > 0 ? String(exports.length) : undefined}
+          />
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-auto p-3 text-sm">
-        {selectedSlotId && job ? (
-          <SelectedSlotDetails
-            template={template}
-            job={job}
-            slotId={selectedSlotId}
-            onPreviewImage={onPreviewImage}
+        {activeTab === "info" ? (
+          selectedSlotId && job ? (
+            <SelectedSlotDetails
+              template={template}
+              job={job}
+              slotId={selectedSlotId}
+              onPreviewImage={onPreviewImage}
+              onRegenerateSlot={onRegenerateSlot}
+            />
+          ) : (
+            <TemplateDetails template={template} />
+          )
+        ) : activeTab === "audio" ? (
+          <AudioTabPanel
+            tracks={audioTracks}
+            selected={selectedAudio}
+            onSelect={onSelectAudio}
+            onUpload={onUploadAudio}
+            uploading={audioUploading}
           />
         ) : (
-          <TemplateDetails template={template} />
+          <ExportsTabPanel
+            exports={exports}
+            templateJob={templateJob}
+            activeExportId={
+              playerSource?.kind === "export" ? playerSource.exportId : null
+            }
+            onSelectExport={onSelectExport}
+          />
         )}
       </div>
     </aside>
   );
+}
+
+function RightTabButton({
+  label,
+  active,
+  onClick,
+  badge,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  badge?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1 transition ${
+        active
+          ? "bg-neutral-800 text-neutral-100"
+          : "text-neutral-500 hover:text-neutral-200"
+      }`}
+    >
+      <span>{label}</span>
+      {badge && (
+        <span
+          className={`rounded-full px-1.5 text-[10px] leading-tight ${
+            active ? "bg-neutral-700 text-neutral-200" : "bg-neutral-800 text-neutral-400"
+          }`}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/* ─── Audio tab ─────────────────────────────────────────────────────────── */
+
+function AudioTabPanel({
+  tracks,
+  selected,
+  onSelect,
+  onUpload,
+  uploading,
+}: {
+  tracks: AudioTrack[];
+  selected: string | null;
+  onSelect: (filename: string | null) => void;
+  onUpload: (files: FileList | File[]) => void;
+  uploading: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <p className="mb-3 text-xs uppercase tracking-wider text-neutral-500">
+        Audio track
+      </p>
+      <p className="mb-3 text-xs text-neutral-400">
+        Pick a track to mux on top of the next walkthrough export. Tracks live
+        in <code className="rounded bg-neutral-800 px-1 py-0.5 text-[11px]">audio/</code>{" "}
+        — drop files there or upload below.
+      </p>
+
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept="audio/mpeg,audio/mp3,audio/m4a,audio/aac,audio/wav,audio/ogg,audio/flac"
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            onUpload(e.target.files);
+            e.target.value = "";
+          }
+        }}
+      />
+
+      <button
+        onClick={() => !uploading && inputRef.current?.click()}
+        disabled={uploading}
+        className="mb-3 flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-neutral-700 px-3 py-2 text-xs text-neutral-300 transition hover:border-neutral-500 hover:bg-neutral-800/50 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {uploading ? (
+          <>
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-600 border-t-neutral-300" />
+            <span>Uploading…</span>
+          </>
+        ) : (
+          <>
+            <span className="text-base leading-none">+</span>
+            <span>Upload audio</span>
+          </>
+        )}
+      </button>
+
+      {tracks.length === 0 ? (
+        <p className="rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-500">
+          No audio yet. Upload one to mux it onto the next export.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1">
+          <button
+            onClick={() => onSelect(null)}
+            className={`flex items-center justify-between rounded border px-3 py-2 text-left text-xs transition ${
+              selected === null
+                ? "border-blue-700 bg-blue-950/40 text-blue-100"
+                : "border-neutral-800 bg-neutral-950 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
+            }`}
+          >
+            <span>No audio (silent export)</span>
+            {selected === null && <span className="text-blue-300">✓</span>}
+          </button>
+          {tracks.map((t) => {
+            const active = selected === t.filename;
+            return (
+              <button
+                key={t.filename}
+                onClick={() => onSelect(t.filename)}
+                className={`flex items-center justify-between gap-2 rounded border px-3 py-2 text-left text-xs transition ${
+                  active
+                    ? "border-blue-700 bg-blue-950/40 text-blue-100"
+                    : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700 hover:text-neutral-100"
+                }`}
+              >
+                <span className="min-w-0 flex-1 truncate" title={t.filename}>
+                  {t.filename}
+                </span>
+                <span className="shrink-0 font-mono text-[10px] text-neutral-500">
+                  {humanBytes(t.size_bytes)}
+                </span>
+                {active && <span className="text-blue-300">✓</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ─── Exports tab ───────────────────────────────────────────────────────── */
+
+function ExportsTabPanel({
+  exports,
+  templateJob,
+  activeExportId,
+  onSelectExport,
+}: {
+  exports: ExportManifest[];
+  templateJob: JobRecord | null;
+  activeExportId: string | null;
+  onSelectExport: (manifest: ExportManifest) => void;
+}) {
+  const inFlight =
+    templateJob !== null &&
+    templateJob.status !== "done" &&
+    templateJob.status !== "error";
+
+  return (
+    <>
+      <p className="mb-3 text-xs uppercase tracking-wider text-neutral-500">
+        Walkthroughs
+      </p>
+
+      {inFlight && (
+        <div className="mb-3 rounded border border-emerald-900/60 bg-emerald-950/30 p-2 text-xs text-emerald-200">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="truncate" title={templateJob!.message}>
+              {templateJob!.message}
+            </span>
+            <span className="font-mono text-[10px] text-emerald-300">
+              {templateJob!.percent}%
+            </span>
+          </div>
+          <div className="h-1 w-full overflow-hidden rounded-full bg-emerald-950">
+            <div
+              className="h-full bg-emerald-400 transition-[width]"
+              style={{ width: `${templateJob!.percent}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {exports.length === 0 && !inFlight ? (
+        <p className="rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-500">
+          No walkthroughs yet. Hit{" "}
+          <span className="text-neutral-300">Generate full walkthrough</span> to
+          render every active slot and stitch them together.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {exports.map((exp) => (
+            <button
+              key={exp.export_id}
+              onClick={() => onSelectExport(exp)}
+              className={`group cursor-pointer overflow-hidden rounded-md border text-left transition ${
+                activeExportId === exp.export_id
+                  ? "border-blue-700 ring-2 ring-blue-700/40"
+                  : "border-neutral-800 hover:border-neutral-700"
+              }`}
+              title={`Play walkthrough · ${exp.slot_count} clips`}
+            >
+              <div className="relative aspect-video bg-neutral-800">
+                {exp.thumbnail_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={backendURL(exp.thumbnail_url)}
+                    alt={exp.export_id}
+                    className="h-full w-full object-cover transition group-hover:scale-[1.02]"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-xs text-neutral-500">
+                    (no thumbnail)
+                  </div>
+                )}
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 transition group-hover:bg-black/45">
+                  <div className="flex translate-y-1 scale-90 items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white opacity-0 shadow-lg transition group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className="h-3 w-3"
+                    >
+                      <path d="M8 5v14l11-7L8 5z" />
+                    </svg>
+                    Play
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1.5">
+                <span className="truncate text-[11px] text-neutral-300">
+                  {formatExportLabel(exp.finished_at)}
+                </span>
+                <span className="shrink-0 font-mono text-[10px] text-neutral-500">
+                  {exp.slot_count} clip{exp.slot_count === 1 ? "" : "s"}
+                  {exp.audio_track ? " · ♪" : ""}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function TemplateDetails({ template }: { template: TemplateFull }) {
@@ -991,18 +1608,48 @@ function SelectedSlotDetails({
   job,
   slotId,
   onPreviewImage,
+  onRegenerateSlot,
 }: {
   template: TemplateFull;
   job: JobRecord;
   slotId: string;
   onPreviewImage: (url: string, label: string) => void;
+  onRegenerateSlot: (slot: SlotDefinition) => void;
 }) {
   const slot = template.slots.find((s) => s.id === slotId);
+  // Show Regenerate only once the slot has finished one way or another —
+  // either successfully (user wants a different take) or with an error
+  // (user wants to retry). While in flight we hide it to avoid double-fires.
+  const canRegenerate =
+    slot !== undefined && (job.status === "done" || job.status === "error");
   return (
     <>
-      <p className="mb-3 text-xs uppercase tracking-wider text-neutral-500">
-        Slot run
-      </p>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <p className="text-xs uppercase tracking-wider text-neutral-500">
+          Slot run
+        </p>
+        {canRegenerate && (
+          <button
+            onClick={() => slot && onRegenerateSlot(slot)}
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-neutral-700 bg-neutral-950 px-2.5 py-1 text-[11px] text-neutral-300 transition hover:border-blue-700 hover:bg-blue-950/40 hover:text-blue-200"
+            title="Re-render this slot. Prior render stays on disk; the next walkthrough export uses the newest one."
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-3 w-3"
+            >
+              <path d="M3 12a9 9 0 1 0 3-6.7" />
+              <path d="M3 4v5h5" />
+            </svg>
+            Regenerate
+          </button>
+        )}
+      </div>
       <p className="mb-1 text-neutral-100">{slot?.label ?? slotId}</p>
       <p className="mb-3 text-xs text-neutral-400">
         Status: <span className="text-neutral-200">{jobStatusLabel(job)}</span>

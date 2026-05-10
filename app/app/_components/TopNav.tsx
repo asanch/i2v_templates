@@ -3,6 +3,8 @@
 type Props = {
   onResetTemplate: () => void;
   showExport: boolean;
+  onExportVideo?: () => void;
+  canExport?: boolean;
 };
 
 /**
@@ -10,8 +12,18 @@ type Props = {
  * right. The project switcher and project label live INSIDE the studio
  * workspace, not here — keeps the nav clean and lets the user scan straight
  * to the project name above the player.
+ *
+ * The Export Video button is a thin shell: it fires whatever handler the
+ * studio registered with us via `onExportVideo`, which itself runs the
+ * /jobs/run-template flow. We disable when the studio reports `canExport`
+ * is false (no project, no photos, classify in flight, etc.).
  */
-export default function TopNav({ onResetTemplate, showExport }: Props) {
+export default function TopNav({
+  onResetTemplate,
+  showExport,
+  onExportVideo,
+  canExport,
+}: Props) {
   return (
     <header className="flex shrink-0 items-center justify-between border-b border-neutral-800 bg-neutral-950 px-6 py-3">
       <div className="flex items-center gap-6">
@@ -37,8 +49,14 @@ export default function TopNav({ onResetTemplate, showExport }: Props) {
       <div className="flex items-center gap-3">
         {showExport && (
           <button
-            className="rounded-full border border-neutral-700 bg-neutral-900 px-4 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
-            disabled
+            onClick={onExportVideo}
+            disabled={!canExport || !onExportVideo}
+            className="rounded-full border border-neutral-700 bg-neutral-900 px-4 py-1.5 text-sm text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            title={
+              !canExport
+                ? "Add photos and finish classification before exporting"
+                : "Render every active slot and stitch into one mp4"
+            }
           >
             Export Video
           </button>

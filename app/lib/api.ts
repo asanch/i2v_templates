@@ -118,12 +118,14 @@ export type JobStatus =
   | "image_pass"
   | "end_frame"
   | "video_pass"
+  | "concatenating"
+  | "muxing_audio"
   | "done"
   | "error";
 
 export type JobRecord = {
   id: string;
-  kind: "run-slot" | "run-template";
+  kind: "run-slot" | "run-template" | "classify";
   project_slug: string;
   template_id: string;
   slot_id: string | null;
@@ -147,6 +149,12 @@ export type JobRecord = {
   reference_paths: string[];
   strategy: string | null;
   model_used: string | null;
+
+  // Template-export fields (populated for kind === "run-template")
+  export_video_url: string | null;
+  export_thumbnail_url: string | null;
+  audio_track: string | null;
+  slot_video_urls: string[];
 };
 
 export type RunSlotRequest = {
@@ -273,5 +281,78 @@ export async function uploadPhotos(
     throw new Error(`POST /projects/${project_slug}/photos → ${res.status}: ${text}`);
   }
   return await res.json();
+}
+
+
+// ─── Walkthrough exports + audio ────────────────────────────────────────────
+
+
+export type AudioTrack = {
+  filename: string;
+  url: string; // /audio/<filename>
+  size_bytes: number;
+};
+
+/** Manifest written by the run-template job for each completed export.
+ *  The Exports tab renders these as clickable thumbnails. */
+export type ExportManifest = {
+  export_id: string;
+  project_slug: string;
+  template_id: string;
+  audio_track: string | null;
+  slot_count: number;
+  video_url: string;            // /outputs/<project>/exports/<id>/walkthrough.mp4
+  thumbnail_url: string | null; // /outputs/<project>/exports/<id>/thumbnail.jpg
+  finished_at: string;
+  slot_video_urls: string[];
+};
+
+export type RunTemplateRequest = {
+  project_slug: string;
+  template_id: string;
+  audio_track?: string | null;
+  generative_video_model?: string;
+  video_duration?: number;
+};
+
+/** Kick off a full-walkthrough render. Returns a JobRecord with kind
+ *  "run-template"; the UI polls /jobs/{id} just like a slot job. */
+export async function runTemplate(req: RunTemplateRequest): Promise<JobRecord> {
+  const res = await fetch(`${BACKEND_URL}/jobs/run-template`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /jobs/run-template → ${res.status}: ${text}`);
+  }
+  return (await res.json()) as JobRecord;
+}
+
+export async function fetchAudioTracks(): Promise<AudioTrack[]> {
+  return fetchJSON<AudioTrack[]>("/audio/tracks");
+}
+
+export async function uploadAudioTracks(
+  files: File[],
+): Promise<{ saved: AudioTrack[]; count: number }> {
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f, f.name);
+  const res = await fetch(`${BACKEND_URL}/audio`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /audio → ${res.status}: ${text}`);
+  }
+  return await res.json();
+}
+
+export async function fetchExports(
+  project_slug: string,
+  template_id: string,
+): Promise<ExportManifest[]> {
+  return fetchJSON<ExportManifest[]>(
+    `/projects/${encodeURIComponent(project_slug)}/exports?template_id=${encodeURIComponent(template_id)}`,
+  );
 }
 

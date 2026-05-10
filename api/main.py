@@ -28,16 +28,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.jobs import (
+    AUDIO_ROOT,
     DEFAULT_GENERATIVE_VIDEO_MODEL,
     DEFAULT_VIDEO_DURATION_SEC,
+    SUPPORTED_AUDIO_EXTS,
     JobRecord,
     create_job,
     get_cached_plan,
     get_job,
     invalidate_plan_cache,
+    list_audio_tracks,
+    list_exports,
     list_slot_results,
     run_classify_job,
     run_slot_job,
+    run_template_job,
 )
 
 
@@ -47,6 +52,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INPUTS_ROOT = REPO_ROOT / "inputs"
 OUTPUTS_ROOT = REPO_ROOT / "outputs"
 TEMPLATES_ROOT = REPO_ROOT / "templates"
+# AUDIO_ROOT comes from api.jobs so the worker and the static mount agree on
+# a single source of truth.
 
 SUPPORTED_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
@@ -159,6 +166,10 @@ if INPUTS_ROOT.exists():
     app.mount("/inputs", StaticFiles(directory=str(INPUTS_ROOT)), name="inputs")
 if OUTPUTS_ROOT.exists():
     app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_ROOT)), name="outputs")
+# Make sure audio/ exists before mounting — uvicorn errors out if the dir is
+# missing at startup, and we want the studio to boot even on a fresh checkout.
+AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 
 
 # ─── Endpoints ──────────────────────────────────────────────────────────────
@@ -419,6 +430,92 @@ def create_project(req: CreateProjectRequest) -> dict:
         "template_name": _project_template_name(req.template_id or DEFAULT_PROJECT_TEMPLATE_ID),
         "cover_photo_url": None,
     }
+
+
+# ─── Audio + walkthrough exports ─────────────────────────────────────────────
+
+
+class RunTemplateRequest(BaseModel):
+    project_slug: str
+    template_id: str
+    audio_track: str | None = None  # filename under audio/, or null
+    generative_video_model: str | None = None
+    video_duration: int | None = None
+
+
+@app.post("/jobs/run-template")
+def jobs_run_template(req: RunTemplateRequest, background: BackgroundTasks) -> JobRecord:
+    """Render every active slot in template order, concat the results, and
+    optionally mux a music track on top. The frontend polls GET /jobs/{id}
+    just like a slot job; on completion the export shows up under
+    GET /projects/{slug}/exports.
+    """
+    try:
+        _resolve_project(req.project_slug)
+    except HTTPException:
+        raise
+
+    job = create_job(
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+        slot_id=None,
+        kind="run-template",
+    )
+    background.add_task(
+        run_template_job,
+        job.id,
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+        audio_track=req.audio_track,
+        generative_video_model=(
+            req.generative_video_model or DEFAULT_GENERATIVE_VIDEO_MODEL
+        ),
+        video_duration=req.video_duration or DEFAULT_VIDEO_DURATION_SEC,
+    )
+    return job
+
+
+@app.get("/audio/tracks")
+def audio_tracks() -> list[dict]:
+    """List all audio files in audio/. Frontend renders these as the audio
+    track dropdown."""
+    return list_audio_tracks()
+
+
+@app.post("/audio")
+async def upload_audio(files: list[UploadFile] = File(...)) -> dict:
+    """Save uploaded audio files into audio/. Filename collisions get a
+    numeric suffix so prior tracks aren't clobbered."""
+    saved: list[dict] = []
+    for f in files:
+        if not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_AUDIO_EXTS:
+            continue
+        safe_name = Path(f.filename).name
+        dest = AUDIO_ROOT / safe_name
+        n = 1
+        while dest.exists():
+            dest = AUDIO_ROOT / f"{Path(safe_name).stem}_{n}{ext}"
+            n += 1
+        contents = await f.read()
+        dest.write_bytes(contents)
+        saved.append({
+            "filename": dest.name,
+            "url": f"/audio/{dest.name}",
+            "size_bytes": len(contents),
+        })
+    return {"saved": saved, "count": len(saved)}
+
+
+@app.get("/projects/{slug}/exports")
+def get_project_exports(slug: str, template_id: str | None = None) -> list[dict]:
+    """Completed walkthrough exports for a project (newest first). Used by
+    the Exports tab in the right panel.
+    """
+    _resolve_project(slug)
+    return list_exports(slug, template_id=template_id)
 
 
 @app.post("/projects/{slug}/photos")

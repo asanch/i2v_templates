@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Photo,
@@ -116,6 +116,12 @@ export default function Home() {
     setSelectedTemplateSummary(null);
   };
 
+  // Imperative bridge from TopNav's Export Video button to the studio's
+  // run-template handler. StudioWorkspace populates `current` on mount and
+  // clears it on unmount so we don't fire stale closures.
+  const exportTriggerRef = useRef<(() => void) | null>(null);
+  const [studioCanExport, setStudioCanExport] = useState(false);
+
   if (loadError) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-neutral-950 px-6 text-center">
@@ -145,6 +151,8 @@ export default function Home() {
       <TopNav
         onResetTemplate={handleResetTemplate}
         showExport={!!selectedTemplate}
+        onExportVideo={() => exportTriggerRef.current?.()}
+        canExport={studioCanExport}
       />
 
       {!selectedTemplate ? (
@@ -163,6 +171,8 @@ export default function Home() {
           selectedProjectSlug={selectedProjectSlug}
           onBackToProjects={handleResetTemplate}
           onPhotosChanged={() => setPhotosTick((n) => n + 1)}
+          exportTriggerRef={exportTriggerRef}
+          setCanExport={setStudioCanExport}
           // After a new project is created via the upload flow, refresh the
           // projects list and switch the active slug to the new project.
           onProjectCreated={(newSlug) => {

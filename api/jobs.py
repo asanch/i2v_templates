@@ -18,12 +18,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
+import subprocess
 import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,7 +33,7 @@ from i2v.end_frame import (
     synthesize_end_frame_real_reference,
 )
 from i2v.image_pass import run_image_pipeline
-from i2v.types import Slot, get_slot, load_template
+from i2v.types import Slot, Template, get_slot, load_template
 from i2v.video_pass import run_video_pass
 
 
@@ -44,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INPUTS_ROOT = REPO_ROOT / "inputs"
 OUTPUTS_ROOT = REPO_ROOT / "outputs"
 TEMPLATES_ROOT = REPO_ROOT / "templates"
+AUDIO_ROOT = REPO_ROOT / "audio"
 JOBS_DIR = OUTPUTS_ROOT / "jobs"
 
 SUPPORTED_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -60,6 +61,8 @@ JobStatus = Literal[
     "image_pass",
     "end_frame",
     "video_pass",
+    "concatenating",
+    "muxing_audio",
     "done",
     "error",
 ]
@@ -98,6 +101,12 @@ class JobRecord(BaseModel):
     reference_paths: list[str] = Field(default_factory=list)
     strategy: str | None = None
     model_used: str | None = None
+
+    # Template-export specific fields (kind == "run-template")
+    export_video_url: str | None = None  # final concatenated mp4
+    export_thumbnail_url: str | None = None  # poster jpg from first slot
+    audio_track: str | None = None  # filename of mux'd audio, if any
+    slot_video_urls: list[str] = Field(default_factory=list)  # in concat order
 
 
 # ─── Storage ────────────────────────────────────────────────────────────────
@@ -268,6 +277,215 @@ def _to_url(absolute_path: str | Path) -> str | None:
 # ─── The worker — runs in a BackgroundTask thread ───────────────────────────
 
 
+class _SlotRenderResult(BaseModel):
+    """Bundle of paths produced by `_render_slot_pipeline`. Both the
+    one-shot run-slot worker and the multi-slot run-template worker consume
+    this so the rendering stages stay defined in exactly one place."""
+
+    model_config = ConfigDict(extra="forbid")
+    slot_id: str
+    run_id: str
+    out_dir: str
+    start_frame_path: str
+    end_frame_path: str | None
+    video_clip_path: str
+    model_used: str
+    strategy: str
+    primary_photo_path: str | None
+    end_frame_photo_path: str | None
+    reference_paths: list[str]
+    summary_path: str
+
+
+def _render_slot_pipeline(
+    *,
+    project_slug: str,
+    template_id: str,
+    slot_id: str,
+    plan: AssignmentPlan,
+    template: Template,
+    generative_video_model: str = DEFAULT_GENERATIVE_VIDEO_MODEL,
+    video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
+    progress: Callable[[str, int, str, dict | None], None] | None = None,
+) -> _SlotRenderResult:
+    """Render one slot end-to-end. Internal helper shared by `run_slot_job`
+    and `run_template_job`. Surfaces stage transitions through `progress`
+    (status, percent, message, extra-fields-dict)."""
+
+    def _emit(status: str, pct: int, msg: str, extra: dict | None = None) -> None:
+        if progress is not None:
+            progress(status, pct, msg, extra)
+
+    slot: Slot = get_slot(template, slot_id)
+    assignment = next(
+        (a for a in plan.slot_assignments if a.slot_id == slot_id),
+        None,
+    )
+    if assignment is None:
+        raise RuntimeError(
+            f"Slot '{slot_id}' has no assignment in plan for project '{project_slug}'"
+        )
+    if not assignment.is_active:
+        raise RuntimeError(
+            f"Slot '{slot_id}' is INACTIVE in plan: {assignment.inactive_reason}"
+        )
+
+    _emit(
+        "image_pass",
+        20,
+        f"Strategy: {assignment.end_frame_strategy}",
+        {
+            "primary_photo_path": assignment.primary_photo_path,
+            "end_frame_photo_path": assignment.end_frame_photo_path,
+            "reference_paths": list(assignment.additional_reference_photo_paths),
+            "strategy": assignment.end_frame_strategy,
+        },
+    )
+
+    # ─── Output directory ───────────────────────────────────────────
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    run_id = f"{ts}_{slot_id}_{uuid.uuid4().hex[:6]}"
+    out_dir = OUTPUTS_ROOT / project_slug / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _emit("image_pass", 25, "Editorial enhance on primary photo", {"run_dir": str(out_dir)})
+
+    # ─── Step 1: image pass on primary ──────────────────────────────
+    primary_dir = out_dir / "primary"
+    primary_result = run_image_pipeline(
+        slot=slot,
+        input_image_path=assignment.primary_photo_path,
+        output_root=str(primary_dir),
+        template_id=template_id,
+        with_logs=False,
+        reference_photos_override=assignment.additional_reference_photo_paths,
+    )
+    start_frame_path = primary_result.final_output_path
+    _emit(
+        "image_pass",
+        50,
+        "Primary frame ready",
+        {"start_frame_url": _to_url(start_frame_path)},
+    )
+
+    # ─── Step 2: end frame synthesis ────────────────────────────────
+    end_frame_path: str | None = None
+    if assignment.end_frame_strategy == "real_reference" and assignment.end_frame_photo_path:
+        _emit("end_frame", 55, "Style-matching the alternate photo as end frame")
+        end_dir = out_dir / "end_frame_real"
+        end_meta = synthesize_end_frame_real_reference(
+            end_frame_photo_path=assignment.end_frame_photo_path,
+            slot=slot,
+            output_dir=end_dir,
+            additional_reference_paths=assignment.additional_reference_photo_paths,
+            with_logs=False,
+        )
+        end_frame_path = end_meta["final_end_frame_path"]
+    elif assignment.end_frame_strategy == "multi_ref_inpaint":
+        _emit("end_frame", 55, "Synthesizing end frame via depthflow extreme")
+        end_dir = out_dir / "end_frame_inpaint"
+        end_meta = synthesize_end_frame_multi_ref_inpaint(
+            start_frame_path=start_frame_path,
+            output_dir=end_dir,
+            slot_label=slot.label,
+            primary_notes=(
+                assignment.primary_classification.notes
+                if assignment.primary_classification
+                else ""
+            ),
+            additional_reference_paths=assignment.additional_reference_photo_paths,
+            with_logs=False,
+        )
+        end_frame_path = end_meta["final_end_frame_path"]
+    # else: depthflow_only / none → no end frame
+
+    if end_frame_path:
+        _emit(
+            "end_frame",
+            70,
+            "End frame ready",
+            {"end_frame_url": _to_url(end_frame_path)},
+        )
+
+    # ─── Step 3: video pass ─────────────────────────────────────────
+    _emit("video_pass", 75, "Generating video clip")
+    video_dir = out_dir / "video"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    if end_frame_path:
+        video_result = run_video_pass(
+            input_image_path=start_frame_path,
+            video_pass_spec=slot.video_pass.model_copy(
+                update={
+                    "prompt": (
+                        f"Smooth cinematic camera move interpolating naturally between "
+                        f"two keyframes of the same {slot.label.lower()}. The motion "
+                        f"should feel like a real camera tracking from the start view "
+                        f"to the end view — not a cut, not a morph. Preserve all "
+                        f"architectural details, materials, fixtures, and lighting from "
+                        f"both keyframes exactly. No new windows, doors, or fixtures "
+                        f"appearing in the interpolated frames. Photorealistic editorial "
+                        f"film style, neutral white balance, no abrupt transitions."
+                    )
+                }
+            ),
+            output_dir=video_dir,
+            slot_id=slot_id,
+            template_id=template_id,
+            run_id=run_id,
+            end_frame_image_path=end_frame_path,
+            with_logs=False,
+            model_override=generative_video_model,
+            duration_override=video_duration,
+            overscan_pct=0.0,
+        )
+        model_used = generative_video_model
+    else:
+        video_result = run_video_pass(
+            input_image_path=start_frame_path,
+            video_pass_spec=slot.video_pass,
+            output_dir=video_dir,
+            slot_id=slot_id,
+            template_id=template_id,
+            run_id=run_id,
+            with_logs=False,
+            duration_override=video_duration,
+        )
+        model_used = slot.video_pass.model
+
+    # ─── Summary write ──────────────────────────────────────────────
+    summary = {
+        "run_id": run_id,
+        "project_slug": project_slug,
+        "template_id": template_id,
+        "slot_id": slot_id,
+        "strategy": assignment.end_frame_strategy,
+        "primary_photo_path": assignment.primary_photo_path,
+        "end_frame_photo_path": assignment.end_frame_photo_path,
+        "reference_paths": list(assignment.additional_reference_photo_paths),
+        "start_frame_path": start_frame_path,
+        "end_frame_path": end_frame_path,
+        "video_clip_path": video_result.output_path,
+        "model_used": model_used,
+        "completed_at": _now_iso(),
+    }
+    summary_path = out_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, default=str))
+
+    return _SlotRenderResult(
+        slot_id=slot_id,
+        run_id=run_id,
+        out_dir=str(out_dir),
+        start_frame_path=str(start_frame_path),
+        end_frame_path=str(end_frame_path) if end_frame_path else None,
+        video_clip_path=str(video_result.output_path),
+        model_used=model_used,
+        strategy=assignment.end_frame_strategy,
+        primary_photo_path=assignment.primary_photo_path,
+        end_frame_photo_path=assignment.end_frame_photo_path,
+        reference_paths=list(assignment.additional_reference_photo_paths),
+        summary_path=str(summary_path),
+    )
+
+
 def run_slot_job(
     job_id: str,
     *,
@@ -297,188 +515,29 @@ def run_slot_job(
         )
         template_path = _resolve_template_path(template_id)
         template = load_template(template_path)
-        slot: Slot = get_slot(template, slot_id)
 
-        assignment = next(
-            (a for a in plan.slot_assignments if a.slot_id == slot_id),
-            None,
-        )
-        if assignment is None:
-            raise RuntimeError(
-                f"Slot '{slot_id}' has no assignment in plan for project '{project_slug}'"
-            )
-        if not assignment.is_active:
-            raise RuntimeError(
-                f"Slot '{slot_id}' is INACTIVE in plan: {assignment.inactive_reason}"
-            )
+        def _progress(status: str, pct: int, msg: str, extra: dict | None) -> None:
+            update_job(job_id, status=status, percent=pct, message=msg, **(extra or {}))
 
-        update_job(
-            job_id,
-            percent=20,
-            message=f"Strategy: {assignment.end_frame_strategy}",
-            primary_photo_path=assignment.primary_photo_path,
-            end_frame_photo_path=assignment.end_frame_photo_path,
-            reference_paths=list(assignment.additional_reference_photo_paths),
-            strategy=assignment.end_frame_strategy,
-        )
-
-        # ─── Output directory ───────────────────────────────────────────
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        run_id = f"{ts}_{slot_id}_{uuid.uuid4().hex[:6]}"
-        out_dir = OUTPUTS_ROOT / project_slug / run_id
-        out_dir.mkdir(parents=True, exist_ok=True)
-        update_job(job_id, run_dir=str(out_dir))
-
-        # ─── Step 1: image pass on primary ──────────────────────────────
-        update_job(
-            job_id,
-            status="image_pass",
-            percent=30,
-            message="Editorial enhance on primary photo",
-        )
-        primary_dir = out_dir / "primary"
-        primary_result = run_image_pipeline(
-            slot=slot,
-            input_image_path=assignment.primary_photo_path,
-            output_root=str(primary_dir),
+        result = _render_slot_pipeline(
+            project_slug=project_slug,
             template_id=template_id,
-            with_logs=False,
-            reference_photos_override=assignment.additional_reference_photo_paths,
+            slot_id=slot_id,
+            plan=plan,
+            template=template,
+            generative_video_model=generative_video_model,
+            video_duration=video_duration,
+            progress=_progress,
         )
-        start_frame_path = primary_result.final_output_path
-        update_job(
-            job_id,
-            percent=50,
-            message="Primary frame ready",
-            start_frame_url=_to_url(start_frame_path),
-        )
-
-        # ─── Step 2: end frame synthesis ────────────────────────────────
-        end_frame_path: str | None = None
-        if assignment.end_frame_strategy == "real_reference" and assignment.end_frame_photo_path:
-            update_job(
-                job_id,
-                status="end_frame",
-                percent=55,
-                message="Style-matching the alternate photo as end frame",
-            )
-            end_dir = out_dir / "end_frame_real"
-            end_meta = synthesize_end_frame_real_reference(
-                end_frame_photo_path=assignment.end_frame_photo_path,
-                slot=slot,
-                output_dir=end_dir,
-                additional_reference_paths=assignment.additional_reference_photo_paths,
-                with_logs=False,
-            )
-            end_frame_path = end_meta["final_end_frame_path"]
-        elif assignment.end_frame_strategy == "multi_ref_inpaint":
-            update_job(
-                job_id,
-                status="end_frame",
-                percent=55,
-                message="Synthesizing end frame via depthflow extreme",
-            )
-            end_dir = out_dir / "end_frame_inpaint"
-            end_meta = synthesize_end_frame_multi_ref_inpaint(
-                start_frame_path=start_frame_path,
-                output_dir=end_dir,
-                slot_label=slot.label,
-                primary_notes=(
-                    assignment.primary_classification.notes
-                    if assignment.primary_classification
-                    else ""
-                ),
-                additional_reference_paths=assignment.additional_reference_photo_paths,
-                with_logs=False,
-            )
-            end_frame_path = end_meta["final_end_frame_path"]
-        # else: depthflow_only / none → no end frame
-
-        if end_frame_path:
-            update_job(
-                job_id,
-                percent=70,
-                message="End frame ready",
-                end_frame_url=_to_url(end_frame_path),
-            )
-
-        # ─── Step 3: video pass ─────────────────────────────────────────
-        update_job(
-            job_id,
-            status="video_pass",
-            percent=75,
-            message="Generating video clip",
-        )
-        video_dir = out_dir / "video"
-        video_dir.mkdir(parents=True, exist_ok=True)
-        if end_frame_path:
-            video_result = run_video_pass(
-                input_image_path=start_frame_path,
-                video_pass_spec=slot.video_pass.model_copy(
-                    update={
-                        "prompt": (
-                            f"Smooth cinematic camera move interpolating naturally between "
-                            f"two keyframes of the same {slot.label.lower()}. The motion "
-                            f"should feel like a real camera tracking from the start view "
-                            f"to the end view — not a cut, not a morph. Preserve all "
-                            f"architectural details, materials, fixtures, and lighting from "
-                            f"both keyframes exactly. No new windows, doors, or fixtures "
-                            f"appearing in the interpolated frames. Photorealistic editorial "
-                            f"film style, neutral white balance, no abrupt transitions."
-                        )
-                    }
-                ),
-                output_dir=video_dir,
-                slot_id=slot_id,
-                template_id=template_id,
-                run_id=run_id,
-                end_frame_image_path=end_frame_path,
-                with_logs=False,
-                model_override=generative_video_model,
-                duration_override=video_duration,
-                overscan_pct=0.0,
-            )
-            model_used = generative_video_model
-        else:
-            video_result = run_video_pass(
-                input_image_path=start_frame_path,
-                video_pass_spec=slot.video_pass,
-                output_dir=video_dir,
-                slot_id=slot_id,
-                template_id=template_id,
-                run_id=run_id,
-                with_logs=False,
-                duration_override=video_duration,
-            )
-            model_used = slot.video_pass.model
-
-        # ─── Summary write ──────────────────────────────────────────────
-        summary = {
-            "run_id": run_id,
-            "project_slug": project_slug,
-            "template_id": template_id,
-            "slot_id": slot_id,
-            "strategy": assignment.end_frame_strategy,
-            "primary_photo_path": assignment.primary_photo_path,
-            "end_frame_photo_path": assignment.end_frame_photo_path,
-            "reference_paths": list(assignment.additional_reference_photo_paths),
-            "start_frame_path": start_frame_path,
-            "end_frame_path": end_frame_path,
-            "video_clip_path": video_result.output_path,
-            "model_used": model_used,
-            "completed_at": _now_iso(),
-        }
-        summary_path = out_dir / "summary.json"
-        summary_path.write_text(json.dumps(summary, indent=2, default=str))
 
         update_job(
             job_id,
             status="done",
             percent=100,
             message="Done",
-            summary_path=_to_url(summary_path),
-            video_url=_to_url(video_result.output_path),
-            model_used=model_used,
+            summary_path=_to_url(result.summary_path),
+            video_url=_to_url(result.video_clip_path),
+            model_used=result.model_used,
         )
     except Exception as exc:  # broad — anything that breaks becomes user-visible
         tb = traceback.format_exc()
@@ -578,6 +637,329 @@ def invalidate_plan_cache(project_slug: str) -> None:
             cache_path.unlink()
         except OSError:
             pass
+
+
+# ─── Audio + exports support ────────────────────────────────────────────────
+
+
+SUPPORTED_AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"}
+
+
+def _audio_track_path(filename: str) -> Path | None:
+    """Resolve a saved track filename to a real path under audio/. Returns
+    None if the file is missing or escapes the audio root (defensive)."""
+    if not filename:
+        return None
+    safe = Path(filename).name  # strip any path components
+    p = (AUDIO_ROOT / safe).resolve()
+    try:
+        p.relative_to(AUDIO_ROOT.resolve())
+    except ValueError:
+        return None
+    if not p.exists() or not p.is_file():
+        return None
+    return p
+
+
+def list_audio_tracks() -> list[dict]:
+    """Every audio file currently in audio/. Exposed via /audio/tracks."""
+    if not AUDIO_ROOT.exists():
+        return []
+    out: list[dict] = []
+    for f in sorted(AUDIO_ROOT.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in SUPPORTED_AUDIO_EXTS:
+            continue
+        out.append({
+            "filename": f.name,
+            "url": f"/audio/{f.name}",
+            "size_bytes": f.stat().st_size,
+        })
+    return out
+
+
+def _ffmpeg_concat_with_optional_audio(
+    *,
+    slot_video_paths: list[Path],
+    audio_path: Path | None,
+    output_path: Path,
+) -> None:
+    """Concat slot mp4s losslessly via ffmpeg's concat demuxer; if `audio_path`
+    is given, replace any existing audio track with it (looped to length of
+    the video and trimmed via -shortest so the output is the video duration).
+
+    Hackathon-grade: assumes all slot videos share resolution / fps / codec,
+    which they do because they're all produced by Kling 3.0 (or DepthFlow)
+    rendered to the same template settings. If they ever diverge, switch to
+    the slower `-filter_complex concat` form.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    list_file = output_path.parent / "concat.txt"
+    list_file.write_text(
+        "".join(f"file '{p.resolve()}'\n" for p in slot_video_paths)
+    )
+
+    if audio_path is None:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file),
+            "-c", "copy",
+            str(output_path),
+        ]
+    else:
+        # Stream-copy video; loop the audio so a short track stretches over a
+        # long walkthrough; trim to whichever is shortest (the video).
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file),
+            "-stream_loop", "-1",
+            "-i", str(audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            str(output_path),
+        ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg concat failed (exit {proc.returncode}):\n"
+            f"  cmd: {' '.join(cmd)}\n"
+            f"  stderr: {proc.stderr[-2000:]}"
+        )
+
+
+def _ffmpeg_extract_thumbnail(*, source_video: Path, output_image: Path) -> None:
+    """Grab a single frame ~1s into the video for use as the export poster."""
+    output_image.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss", "00:00:01",
+        "-i", str(source_video),
+        "-frames:v", "1",
+        "-q:v", "3",
+        str(output_image),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Non-fatal: log but don't blow up the export.
+        print(f"[thumbnail] failed: {proc.stderr[-500:]}")
+
+
+def run_template_job(
+    job_id: str,
+    *,
+    project_slug: str,
+    template_id: str,
+    audio_track: str | None = None,
+    generative_video_model: str = DEFAULT_GENERATIVE_VIDEO_MODEL,
+    video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
+) -> None:
+    """Render every active slot in template order and concat the results
+    into one mp4 under outputs/<project>/exports/<run_id>/walkthrough.mp4.
+
+    Reuses any previously-rendered slot videos (via list_slot_results) so
+    repeated exports are cheap; only missing slots run through the image →
+    end-frame → video pipeline. If `audio_track` matches a file in audio/,
+    it's mux'd onto the final concat (looped + -shortest)."""
+    try:
+        update_job(
+            job_id,
+            status="classifying",
+            percent=2,
+            message="Loading plan and template",
+        )
+        plan = _get_or_build_plan(
+            project_slug=project_slug,
+            template_id=template_id,
+        )
+        template_path = _resolve_template_path(template_id)
+        template = load_template(template_path)
+
+        # Active slots in render order — the template order field. Inactive
+        # slots (no photo for that scene_kind) are skipped silently rather
+        # than failing the whole export.
+        all_slots = sorted(template.slots, key=lambda s: s.order)
+        active_assignments = {
+            a.slot_id: a for a in plan.slot_assignments if a.is_active
+        }
+        active_slots = [s for s in all_slots if s.id in active_assignments]
+        if not active_slots:
+            raise RuntimeError(
+                "Template has no active slots — every slot was marked inactive "
+                "during classification (did the project have any photos?)"
+            )
+
+        # Reuse previously-rendered slot videos; track which slots are missing.
+        prior = list_slot_results(project_slug, template_id)
+        slot_video_urls: list[str] = []
+        slot_video_paths: list[Path] = []
+
+        # Each missing slot gets ~80% of the progress bar split evenly across
+        # them; the final 20% covers concat + audio mux.
+        missing = [s for s in active_slots if s.id not in prior]
+        per_slot_pct = (80 // max(len(missing), 1))
+        base_pct = 5
+
+        for idx, slot in enumerate(active_slots):
+            existing = prior.get(slot.id)
+            if existing and existing.video_url:
+                # Reuse — convert the /outputs/... URL back to absolute path.
+                rel = existing.video_url.removeprefix("/outputs/")
+                slot_video_paths.append(OUTPUTS_ROOT / rel)
+                slot_video_urls.append(existing.video_url)
+                continue
+
+            update_job(
+                job_id,
+                status="image_pass",
+                percent=base_pct,
+                message=f"Rendering slot {idx + 1}/{len(active_slots)}: {slot.label}",
+                slot_id=slot.id,
+            )
+
+            def _progress(status: str, pct: int, msg: str, extra: dict | None) -> None:
+                # Map per-slot 0..100 → our partial slice of the overall bar.
+                slot_pct = base_pct + (pct * per_slot_pct // 100)
+                update_job(
+                    job_id,
+                    status=status,
+                    percent=min(slot_pct, 84),
+                    message=f"Slot {idx + 1}/{len(active_slots)} · {msg}",
+                    **(extra or {}),
+                )
+
+            result = _render_slot_pipeline(
+                project_slug=project_slug,
+                template_id=template_id,
+                slot_id=slot.id,
+                plan=plan,
+                template=template,
+                generative_video_model=generative_video_model,
+                video_duration=video_duration,
+                progress=_progress,
+            )
+            slot_video_paths.append(Path(result.video_clip_path))
+            url = _to_url(result.video_clip_path)
+            if url:
+                slot_video_urls.append(url)
+            base_pct += per_slot_pct
+
+        # ─── Concat ───────────────────────────────────────────────────
+        update_job(
+            job_id,
+            status="concatenating",
+            percent=85,
+            message=f"Stitching {len(slot_video_paths)} clips",
+            slot_video_urls=slot_video_urls,
+            slot_id=None,  # clear: we're past per-slot work
+        )
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+        export_id = f"{ts}_{uuid.uuid4().hex[:6]}"
+        export_dir = OUTPUTS_ROOT / project_slug / "exports" / export_id
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_video = export_dir / "walkthrough.mp4"
+
+        audio_path: Path | None = None
+        if audio_track:
+            audio_path = _audio_track_path(audio_track)
+            if audio_path is None:
+                raise RuntimeError(
+                    f"Audio track '{audio_track}' not found in audio/. "
+                    "Upload it via the Audio tab or remove the selection."
+                )
+            update_job(
+                job_id,
+                status="muxing_audio",
+                percent=90,
+                message=f"Muxing audio: {audio_track}",
+                audio_track=audio_track,
+            )
+
+        _ffmpeg_concat_with_optional_audio(
+            slot_video_paths=slot_video_paths,
+            audio_path=audio_path,
+            output_path=export_video,
+        )
+
+        # ─── Thumbnail ────────────────────────────────────────────────
+        thumb_path = export_dir / "thumbnail.jpg"
+        _ffmpeg_extract_thumbnail(
+            source_video=export_video,
+            output_image=thumb_path,
+        )
+
+        # ─── Manifest write (for /projects/{slug}/exports listing) ────
+        manifest = {
+            "export_id": export_id,
+            "project_slug": project_slug,
+            "template_id": template_id,
+            "audio_track": audio_track,
+            "slot_count": len(slot_video_paths),
+            "video_url": _to_url(export_video),
+            "thumbnail_url": _to_url(thumb_path) if thumb_path.exists() else None,
+            "finished_at": _now_iso(),
+            "slot_video_urls": slot_video_urls,
+        }
+        (export_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+        update_job(
+            job_id,
+            status="done",
+            percent=100,
+            message=f"Walkthrough ready · {len(slot_video_paths)} clips",
+            export_video_url=_to_url(export_video),
+            export_thumbnail_url=_to_url(thumb_path) if thumb_path.exists() else None,
+            video_url=_to_url(export_video),  # mirrored so generic players can pick it up
+            audio_track=audio_track,
+            slot_video_urls=slot_video_urls,
+        )
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[job {job_id}] TEMPLATE ERROR: {exc}\n{tb}")
+        update_job(
+            job_id,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+            message="Walkthrough failed",
+        )
+
+
+def list_exports(project_slug: str, template_id: str | None = None) -> list[dict]:
+    """All completed walkthrough exports for a project, newest first.
+
+    Reads the manifest.json each export job writes; the UI surfaces these
+    in the Exports tab as clickable thumbnails. Falls back to scanning the
+    jobs/ directory if a manifest is missing (older jobs).
+    """
+    exports_dir = OUTPUTS_ROOT / project_slug / "exports"
+    if not exports_dir.exists():
+        return []
+    out: list[dict] = []
+    for run_dir in sorted(exports_dir.iterdir(), reverse=True):
+        if not run_dir.is_dir():
+            continue
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except Exception:
+            continue
+        if template_id and manifest.get("template_id") != template_id:
+            continue
+        out.append(manifest)
+    return out
 
 
 def get_cached_plan(project_slug: str, template_id: str) -> dict | None:
