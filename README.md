@@ -29,7 +29,21 @@ pip install -e ".[dev]"
 # 2. Configure fal key
 cp .env.example .env
 # edit .env and set FAL_KEY
+
+# 3. Install DepthFlow CLI (isolated, NOT in this venv)
+#    DepthFlow is the local backend for parallax video passes. We only need
+#    the CLI; it's invoked via subprocess. Keep it out of our venv to avoid
+#    pulling torch + imgui-bundle + glfw into our deps.
+brew install pipx           # if not already installed
+pipx ensurepath             # ensures ~/.local/bin (or similar) is on PATH
+pipx install depthflow
+depthflow --help            # confirm CLI is reachable
 ```
+
+If pipx fails (or DepthFlow's pip install hits a transitive packaging issue
+like the imgui-bundle 1.6.3 path-escape bug), the fallback is a portable
+executable: download for macOS from
+https://github.com/BrokenSource/DepthFlow/releases and put it on PATH.
 
 ---
 

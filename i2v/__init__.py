@@ -8,6 +8,16 @@ Public surface:
     - list_known_models / list_known_video_models: enumerate registered models
 """
 
+from i2v.classifier import (
+    AssignmentPlan,
+    PhotoClassification,
+    SlotAssignment,
+    assign_to_slots,
+    classify_and_assign,
+    classify_photo,
+    classify_photos,
+    resolve_alternate_angles,
+)
 from i2v.image_pass import run_image_pass, run_image_pipeline
 from i2v.models import list_known_models, resolve_model
 from i2v.types import (
@@ -23,22 +33,34 @@ from i2v.types import (
 )
 from i2v.video_models import list_known_video_models, resolve_video_model
 from i2v.video_pass import run_video_pass
+from i2v.video_restyle import run_v2v_restyle
+from i2v.video_upscale import run_starlight_upscale
 
 __all__ = [
+    "AssignmentPlan",
     "ImagePass",
     "ImagePassResult",
     "ImagePipelineResult",
+    "PhotoClassification",
     "Slot",
+    "SlotAssignment",
     "Template",
     "VideoPass",
     "VideoPassResult",
+    "assign_to_slots",
+    "classify_and_assign",
+    "classify_photo",
+    "classify_photos",
     "get_slot",
     "list_known_models",
     "list_known_video_models",
     "load_template",
+    "resolve_alternate_angles",
     "resolve_model",
     "resolve_video_model",
     "run_image_pass",
     "run_image_pipeline",
+    "run_starlight_upscale",
+    "run_v2v_restyle",
     "run_video_pass",
 ]

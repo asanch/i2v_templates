@@ -10,7 +10,33 @@ dependencies = [
     "Pillow>=10.4.0",
     "click>=8.1.7",
     "httpx>=0.27.0",
+    # FastAPI backend that powers the Next.js studio UI. Keep the dep
+    # footprint small — uvicorn handles HTTP, fastapi is the framework,
+    # python-multipart is needed for any future file uploads from the UI.
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
 ]
+# Constraint: every external model call goes through fal. No direct provider
+# SDKs (no google-genai, no openai, no anthropic). Vision LLM classification
+# routes through fal's openrouter/router/vision endpoint with
+# model=google/gemini-2.5-flash. See i2v/classifier.py.
+
+# DepthFlow is intentionally NOT a Python dep of this package.
+# We invoke it via subprocess (`depthflow ...`), so we only need the CLI on
+# PATH — not the Python module imported into our process. Reasons:
+#   1. DepthFlow pulls heavy GUI/GL deps (imgui-bundle, glfw, shaderflow,
+#      torch). Dragging those into every venv that uses i2v-templates is
+#      wasteful when our use is one subprocess call.
+#   2. imgui-bundle 1.6.3 has a packaging issue (PEP 706 path-escape) that
+#      blocks install on modern pip; isolating depthflow keeps that mess
+#      out of our resolution.
+#   3. pipx-installed CLIs are upgrade-isolated. depthflow can move to a
+#      newer version without touching our deps.
+# Install separately on the operator's machine:
+#     pipx install depthflow
+# Or grab a portable executable from
+#     https://github.com/BrokenSource/DepthFlow/releases
 
 [project.optional-dependencies]
 dev = [
@@ -21,6 +47,10 @@ dev = [
 [project.scripts]
 i2v-run-slot = "scripts.run_slot:main"
 i2v-run-video = "scripts.run_video:main"
+i2v-run-v2v = "scripts.run_v2v:main"
+i2v-run-starlight = "scripts.run_starlight:main"
+i2v-classify = "scripts.classify_and_assign:main"
+i2v-run-plan-slot = "scripts.run_plan_slot:main"
 i2v-list-models = "scripts.list_models:main"
 i2v-list-video-models = "scripts.list_video_models:main"
 
@@ -29,7 +59,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["i2v", "scripts"]
+packages = ["i2v", "scripts", "api"]
 
 [tool.ruff]
 line-length = 100

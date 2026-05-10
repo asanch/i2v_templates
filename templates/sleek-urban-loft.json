@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "template": {
+    "id": "sleek-urban-loft",
+    "name": "Sleek Urban Loft",
+    "author": "AutoHDR",
+    "description": "Industrial loft style with hard light, polished concrete, and cityscape window views. Coming soon.",
+    "duration_sec": 60,
+    "aspect_ratio": "16:9",
+    "resolution": "1920x1080",
+    "fps": 24,
+    "thumbnail": null,
+    "enabled": false
+  },
+  "slots": [
+    {
+      "id": "01_placeholder",
+      "label": "Placeholder",
+      "order": 1,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "living",
+        "intent": "Stub for UI gallery; this template is not runnable yet."
+      },
+      "image_pipeline": [
+        {
+          "label": "stub",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "Stub — not runnable.",
+          "parameters": {}
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_truck",
+        "prompt": "Stub.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      }
+    }
+  ],
+  "transitions": [],
+  "music": {
+    "track_path": "assets/music/stub.mp3",
+    "master_volume_db": -6
+  },
+  "post": {}
+}

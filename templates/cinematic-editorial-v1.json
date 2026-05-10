@@ -4,9 +4,9 @@
     "id": "cinematic-editorial-v1",
     "name": "Cinematic Editorial — Architectural",
     "author": "Aaron",
-    "description": "Eight-shot cinematic walkthrough in the editorial-architectural style. Harsh directional shadows, controlled exposure, slow camera moves, time-lapse light progression. Prompts derived verbatim from the AutoHDR creator-iteration kit.",
+    "description": "Twelve-slot cinematic walkthrough in the editorial-architectural style. Architecture-preservation hard-constrained: prompts forbid adding or removing windows, doors, fixtures, or any structural element. Style is delivered through tonal/color grading only — like a colorist's pass over real footage, not an AI re-imagining. Most slots are required=false so the apply pipeline gracefully skips when a house lacks photos for that scene.",
     "reference_url": null,
-    "duration_sec": 44,
+    "duration_sec": 60,
     "aspect_ratio": "16:9",
     "resolution": "1920x1080",
     "fps": 24
@@ -20,7 +20,7 @@
       "required": true,
       "photo_requirement": {
         "scene_kind": "exterior_front",
-        "intent": "Front of the house, full façade visible, framed from across the street or driveway.",
+        "intent": "Front of the house, full façade visible. Establishing shot.",
         "composition_hints": [
           "Stand 25–40 ft from the front of the house",
           "Center the front door horizontally; keep camera level",
@@ -33,19 +33,54 @@
           "label": "editorial_enhance",
           "source": "input_photo",
           "model": "fal-ai/nano-banana/edit",
-          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. Highlights should stay controlled and natural. Editorial film style, atmospheric architectural cinematography. Preserve all architectural details. Sky density preserved.",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture and landscape EXACTLY. Do not add, remove, or move any window, door, roofline, gable, column, fixture, plant, vehicle, or structural element.\n• Do not invent any feature not visible in the source photo.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial color grade for an architectural exterior.\n• Slight warm tint in shadows, neutral midtones, controlled highlight rolloff.\n• Sky density preserved (no washed-out skies, no blown highlights).\n• Subtle 35mm film grain.\n• Photorealistic. Treat this as a colorist's grade over a real photograph.",
           "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
         }
       ],
       "video_pass": {
-        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Static exterior shot of the house with very subtle camera push forward, less than 5 percent of frame. Architecture remains exactly stable — rooflines, windows, doors, and façade details do not change shape or position. Soft directional sunlight gradually shifts as if minutes are passing; shadows on the façade lengthen subtly. Slow gentle cloud drift in the sky. No lens flare, no light beams, no dramatic light events, no atmospheric particles, no weather changes. Smooth stable motion, no camera shake. Cinematic editorial film grain. Neutral white balance, photorealistic.",
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked subtle forward push. Depth-reprojected from the source.",
         "duration_sec": 6,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,
-        "extra_args": { "generate_audio": false }
+        "extra_args": {}
       },
       "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 400, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "02_entry_dolly_in",
+      "label": "Entry — Dolly In",
+      "order": 2,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "entry",
+        "intent": "Looking from the front door inward, or from inside the entry. Establishes the threshold.",
+        "composition_hints": [
+          "Stand at the front door looking in (or just inside looking deeper)",
+          "Center the strongest leading line — usually a hallway or sightline",
+          "Open all visible doors"
+        ],
+        "ideal_time_of_day": "any"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, fixture, wall, ceiling detail, floor material, or piece of furniture.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Bright, inviting interior grade. Soft cinematic feel.\n• Lifted midtones for clarity, gentle shadows (never crushed).\n• Slight warm bias in shadows, neutral whites, soft highlight rolloff.\n• Preserve all visible material textures (wood, stone, fabric).\n• Photorealistic. Colorist's grade, not an AI rewrite.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked subtle forward push through the entry. Depth-reprojected.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
     },
 
     {
@@ -55,11 +90,10 @@
       "required": true,
       "photo_requirement": {
         "scene_kind": "kitchen",
-        "intent": "Wide kitchen shot showing the island or main run of cabinetry, with at least one window or natural light source in frame.",
+        "intent": "Wide kitchen shot showing the island or main run of cabinetry.",
         "composition_hints": [
           "Stand at one corner of the kitchen, capture the full opposite wall",
           "Get the full counter or island in frame",
-          "Aim for visible natural light from a window or doorway",
           "Clear the counters of clutter"
         ],
         "ideal_time_of_day": "midday"
@@ -69,17 +103,87 @@
           "label": "editorial_enhance",
           "source": "input_photo",
           "model": "fal-ai/nano-banana/edit",
-          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. The interior should feel brighter and more intentional, not flat or evenly lit—shadows must remain graphic, directional, and editorial. Highlights should stay controlled and natural. Apply intentional, filmic window pulls that reveal deep, rich exterior views—preserve sky density, environmental color, and contrast beyond the glass. Exterior scenes should feel dimensional and weighty, never washed out or pastel. Window highlights must roll off smoothly with realistic falloff; avoid haloing, edge glow, or global tonal compression. Do not flatten contrast or lift blacks globally. Window recovery should feel localized, natural, and optically believable—similar to a well-exposed negative rather than HDR processing. Preserve all architectural and interior details. The scene should feel well-lit yet moody, polished and cinematic. Derive all lighting direction strictly from visible sources in the frame—windows, doors, architectural openings, and practical fixtures (lamps, sconces, pendants). Do not introduce light from walls or areas without logical entry points. Maintain strong tonal separation between interior shadows and exterior highlights; window views should read clear, saturated, and contrast-rich, while the interior retains depth, drama, and editorial punch.",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, cabinet, drawer, appliance, fixture, light, countertop edge, or piece of decor.\n• Do not add light sources, windows, or openings that aren't already in the source. If the source has no window, do NOT introduce one to motivate a 'window pull' look.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n• Cabinet fronts, hardware, and counter materials must remain identical.\n\nSTYLE DIRECTION:\n• Cinematic editorial kitchen grade.\n• Subtle directional shadow shaping ONLY on surfaces already visible — do not cast shadows from imagined light.\n• Lifted midtones for clarity. Controlled highlight rolloff (no halos, no HDR look).\n• Slight warm shadow tint, neutral whites.\n• Preserve material textures: stone counter veining, wood grain, metal hardware finish.\n• Subtle 35mm film grain.\n• Photorealistic. Roger Deakins-style colorist grade over a real kitchen photograph.",
           "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
         }
       ],
       "video_pass": {
-        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Static wide interior of the kitchen with extremely subtle camera drift, less than 4 percent of frame. Cabinetry, countertops, island, fixtures, appliances, and floor remain exactly stable — no morphing, no shape changes, no warping of edges or hardware. Soft natural sunlight gradually shifts across countertops and cabinet faces as if minutes are passing. Gentle, subtle shadow movement only. No dramatic light events, no lens flare, no lightning, no sudden brightness shifts, no atmospheric haze. Stable geometry throughout. Cinematic editorial film grain. Neutral white balance, photorealistic.",
+        "model": "local/depthflow/slow_truck",
+        "prompt": "Architecture-locked subtle lateral parallax through the kitchen. Depth-reprojected.",
         "duration_sec": 6,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,
-        "extra_args": { "generate_audio": false }
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "04_living_wide_truck",
+      "label": "Living Room — Wide Truck",
+      "order": 4,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "living",
+        "intent": "Wide living-room shot showing the main seating arrangement.",
+        "composition_hints": [
+          "Stand at the entry to the room, capture the full seating area",
+          "Center the focal point if there's a fireplace or hero window",
+          "Capture full ceiling height if possible"
+        ],
+        "ideal_time_of_day": "afternoon"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, fireplace, mantel, ceiling beam, light fixture, piece of furniture, art, or decor.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial living-room grade. Warm, inviting, but composed.\n• Subtle directional shadow shaping ONLY on surfaces already visible.\n• Lifted midtones, controlled highlights, deep but readable blacks.\n• Slight warm tint in shadows. Neutral whites. Soft highlight rolloff.\n• Preserve fabric textures (upholstery weave, throw pillows, rugs) and wood/stone grain.\n• Subtle 35mm film grain.\n• Photorealistic. Colorist's grade over a real photograph.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_truck",
+        "prompt": "Architecture-locked subtle lateral parallax through the living room. Depth-reprojected.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "05_dining_dolly_in",
+      "label": "Dining — Dolly In",
+      "order": 5,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "dining",
+        "intent": "Dining area with the table as focal point.",
+        "composition_hints": [
+          "Stand at one end of the dining space, look down the table",
+          "If a chandelier or light fixture is present, frame it",
+          "Capture full ceiling height if possible"
+        ],
+        "ideal_time_of_day": "afternoon"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, light fixture, chair, table, art, or decor.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial dining-room grade. Warm and gathered-feeling.\n• Subtle directional shadow shaping ONLY on surfaces already visible.\n• Lifted midtones, controlled highlights, deep readable blacks.\n• Preserve material textures (wood, fabric, metal hardware).\n• Subtle 35mm film grain.\n• Photorealistic. Colorist's grade over a real photograph.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked forward push through the dining space. Depth-reprojected.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
       },
       "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
     },
@@ -91,7 +195,7 @@
       "required": false,
       "photo_requirement": {
         "scene_kind": "kitchen",
-        "intent": "Same source photo as the kitchen wide. The image pipeline recomposes it into a tight 85mm detail shot of the island corner with shallow depth of field. Two-pass chain: first cinematic editorial enhance, then recompose to detail.",
+        "intent": "Same source as kitchen wide. Two-pass: editorial enhance, then 85mm detail recompose.",
         "composition_hints": [
           "Reuse the same wide kitchen photo used for slot 03",
           "Source must include an island or counter corner with sink or feature visible"
@@ -103,26 +207,242 @@
           "label": "editorial_enhance",
           "source": "input_photo",
           "model": "fal-ai/nano-banana/edit",
-          "prompt": "Transform this photo into a cinematic editorial image with harsh, directional shadows and crisp light shaping. Correct any perspective distortion—ensure vertical lines are truly vertical and horizontal lines are level. Maintain the exact scene composition after correction and preserve the original white balance. Balance overall exposure with intention: raise interior midtones subtly for improved readability and presence, while preserving deep, sculpted shadow structure and strong contrast. The interior should feel brighter and more intentional, not flat or evenly lit—shadows must remain graphic, directional, and editorial. Highlights should stay controlled and natural. Apply intentional, filmic window pulls that reveal deep, rich exterior views—preserve sky density, environmental color, and contrast beyond the glass. Exterior scenes should feel dimensional and weighty, never washed out or pastel. Window highlights must roll off smoothly with realistic falloff; avoid haloing, edge glow, or global tonal compression. Do not flatten contrast or lift blacks globally. Window recovery should feel localized, natural, and optically believable—similar to a well-exposed negative rather than HDR processing. Preserve all architectural and interior details. The scene should feel well-lit yet moody, polished and cinematic. Derive all lighting direction strictly from visible sources in the frame—windows, doors, architectural openings, and practical fixtures (lamps, sconces, pendants). Do not introduce light from walls or areas without logical entry points. Maintain strong tonal separation between interior shadows and exterior highlights; window views should read clear, saturated, and contrast-rich, while the interior retains depth, drama, and editorial punch.",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, cabinet, drawer, appliance, fixture, light, countertop edge, or piece of decor.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial kitchen grade.\n• Subtle directional shadow shaping ONLY on surfaces already visible.\n• Lifted midtones, controlled highlights, deep readable blacks.\n• Slight warm shadow tint, neutral whites.\n• Preserve material textures: stone counter veining, wood grain, metal hardware finish.\n• Subtle 35mm film grain.\n• Photorealistic. Colorist's grade over a real photograph.",
           "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
         },
         {
           "label": "recompose_detail",
           "source": "previous_pass",
           "model": "fal-ai/nano-banana/edit",
-          "prompt": "Recompose this image as an 85mm close-up detail shot of the kitchen island corner — focus on the countertop edge, sink area, faucet, and the cabinetry beneath. Tight crop, shallow depth of field with cinematic bokeh on the background. Preserve the original materials, colors, white balance, and lighting direction. Cinematic editorial style. Neutral white balance, balanced exposure — deep shadows without underexposure. Sharp texture detail in stone countertop, wood cabinetry, and architectural elements. Shallow depth of field.",
+          "prompt": "ABSOLUTE CONSTRAINTS:\n• Preserve all materials, colors, white balance, and lighting direction from the source image.\n• Do not invent any feature not visible in the source. Stone, wood, metal, and ceramic must remain the exact textures and colors of the source.\n\nRECOMPOSE:\n• Tight 85mm close-up of the kitchen island corner — countertop edge, sink, faucet, cabinetry beneath.\n• Shallow depth of field with cinematic bokeh on the background.\n• Sharp texture detail in stone countertop, wood cabinetry, hardware.\n• Photorealistic editorial style. Neutral white balance, balanced exposure with deep but not crushed shadows.",
           "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
         }
       ],
       "video_pass": {
-        "model": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "prompt": "Tight static close-up shot. Camera holds nearly still with at most 2 percent drift. The countertop edge, sink, faucet, and cabinetry beneath remain exactly stable — materials, edges, hardware, and joinery do not change shape, position, or texture. Soft directional light gradually shifts across the stone surface; subtle shadow movement only. Shallow depth of field; bokeh background remains coherent and does not morph. No dramatic light events, no lens flare, no morphing of materials, no liquid or condensation appearing. Photorealistic editorial style, film grain. Neutral white balance.",
+        "model": "local/depthflow/static_with_light_drift",
+        "prompt": "Architecture-locked near-static parallax on the recomposed 85mm detail. Depth-reprojected.",
         "duration_sec": 5,
         "start_frame_source": "image_pipeline.last",
         "end_frame_source": null,
-        "extra_args": { "generate_audio": false }
+        "extra_args": {}
       },
       "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "07_primary_bed_truck",
+      "label": "Primary Bedroom — Slow Truck",
+      "order": 7,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "primary_bed",
+        "intent": "Primary bedroom from the doorway or a corner.",
+        "composition_hints": [
+          "Stand at the bedroom doorway looking in",
+          "Center the bed if possible",
+          "Capture at least one window for natural light"
+        ],
+        "ideal_time_of_day": "morning"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, headboard, fixture, art, lamp, or piece of furniture.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Bright, airy, restful bedroom grade.\n• Lifted midtones for clarity. Soft, gentle shadows — never crushed or dramatic.\n• Neutral whites with slight warm tint in shadows.\n• Preserve linen, fabric, and wood textures.\n• Subtle film grain.\n• Photorealistic. Colorist's grade over a real photograph — calm, inviting, polished.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_truck",
+        "prompt": "Architecture-locked subtle lateral parallax through the bedroom. Depth-reprojected.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "08_primary_bath_detail_85mm",
+      "label": "Primary Bath — 85mm Detail",
+      "order": 8,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "primary_bath",
+        "intent": "Primary bathroom — vanity, tub, or shower. Tight detail framing.",
+        "composition_hints": [
+          "Get close — this is a detail shot, not a wide",
+          "Capture stone, tile, or wood-grain texture",
+          "Look for natural light hitting a surface"
+        ],
+        "ideal_time_of_day": "midday"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture EXACTLY. Do not add, remove, or move any window, door, faucet, cabinet, mirror, light fixture, tile, or fitting.\n• Do not add light sources, windows, or openings that aren't already in the source.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Bright, clean cinematic grade for a bathroom.\n• Soft directional shadow shaping ONLY on surfaces already visible.\n• Lifted midtones, controlled highlights, deep readable blacks.\n• Preserve stone, tile, metal, and ceramic textures with crisp detail.\n• Subtle film grain.\n• Photorealistic. Colorist's grade over a real photograph.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        },
+        {
+          "label": "recompose_detail",
+          "source": "previous_pass",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS:\n• Preserve all materials, colors, white balance, and lighting direction from the source image.\n• Do not invent any feature not visible in the source.\n\nRECOMPOSE:\n• 85mm close-up of bathroom cabinetry, vanity surface, or tile detail.\n• Shallow depth of field with cinematic bokeh on the background.\n• Sharp texture detail in stone, wood grain, metal hardware.\n• Photorealistic editorial style. Neutral white balance, balanced exposure with deep but not crushed shadows.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/static_with_light_drift",
+        "prompt": "Architecture-locked near-static parallax on the recomposed 85mm bath detail. Depth-reprojected.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "09a_outdoor_yard_dolly_in",
+      "label": "Outdoor Yard — Dolly In",
+      "order": 9,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "outdoor_yard",
+        "intent": "Backyard or garden showing landscaping and any hardscape.",
+        "composition_hints": [
+          "Stand at the edge of the yard, look across",
+          "Frame so the house is partially visible at one edge",
+          "Capture any landscape feature"
+        ],
+        "ideal_time_of_day": "golden"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS:\n• Preserve the landscape and architecture EXACTLY. Do not add, remove, or move any structure, plant, tree, hardscape, or furnishing.\n• Do not invent any element not visible in the source.\n• The output is the SAME scene with adjusted color and tone.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Golden-hour or late-afternoon cinematic grade for an outdoor space.\n• Warm tint in highlights, rich greens and earth tones.\n• Deep but readable shadows.\n• Sky and atmospheric perspective preserved (no blown skies).\n• Subtle film grain.\n• Photorealistic editorial style.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked forward push through the outdoor space. Depth-reprojected.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "09b_outdoor_pool_dolly_in",
+      "label": "Outdoor Pool — Dolly In",
+      "order": 10,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "outdoor_pool",
+        "intent": "Pool area with water visible.",
+        "composition_hints": [
+          "Stand at one end of the pool, look down its length",
+          "Frame the house architecture as background",
+          "Catch reflections on the water"
+        ],
+        "ideal_time_of_day": "golden"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS:\n• Preserve the landscape, architecture, and pool EXACTLY. Do not add, remove, or move any structure, plant, fixture, lounge chair, or piece of decor.\n• Do not invent any element not visible in the source.\n• Water surface and reflections must remain consistent with the source pose.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Golden-hour or blue-hour cinematic grade.\n• Warm color in highlights, deep blacks, controlled rolloff.\n• Water reflections preserved with realistic specular highlights.\n• Sky density and atmospheric perspective preserved.\n• Subtle film grain.\n• Photorealistic editorial style.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked forward push toward the pool. Depth-reprojected.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "09c_outdoor_patio_dolly_in",
+      "label": "Outdoor Patio — Dolly In",
+      "order": 11,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "outdoor_patio",
+        "intent": "Patio or covered outdoor living area.",
+        "composition_hints": [
+          "Stand at the edge of the patio, look across",
+          "Frame any covered architecture (pergola, eave, ceiling)",
+          "Catch any practical fixtures"
+        ],
+        "ideal_time_of_day": "golden"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS:\n• Preserve the architecture and furnishings EXACTLY. Do not add, remove, or move any structure, plant, fixture, or piece of furniture.\n• Do not invent any element not visible in the source.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial grade for an outdoor patio.\n• Warm tint in highlights, rich greens and earth tones.\n• Deep but readable shadows.\n• Sky preserved if visible.\n• Subtle film grain.\n• Photorealistic editorial style.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_in",
+        "prompt": "Architecture-locked forward push through the patio. Depth-reprojected.",
+        "duration_sec": 5,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 0 }
+    },
+
+    {
+      "id": "10_hero_exterior_pull_back",
+      "label": "Hero Exterior — Pull Back",
+      "order": 12,
+      "required": false,
+      "photo_requirement": {
+        "scene_kind": "exterior_front",
+        "intent": "Closing exterior shot. Different exterior photo than slot 01 if multiple exist.",
+        "composition_hints": [
+          "Prefer a photo with sky in frame",
+          "If only one exterior photo is available, this slot will be inactive"
+        ],
+        "ideal_time_of_day": "golden"
+      },
+      "image_pipeline": [
+        {
+          "label": "editorial_enhance",
+          "source": "input_photo",
+          "model": "fal-ai/nano-banana/edit",
+          "prompt": "ABSOLUTE CONSTRAINTS — these override every style direction below:\n• Preserve the architecture and landscape EXACTLY. Do not add, remove, or move any window, door, roofline, gable, column, fixture, plant, or vehicle.\n• Do not invent any feature not visible in the source photo.\n• The output is the SAME scene with adjusted color and tone — not a reimagining.\n• Match the source white balance.\n\nSTYLE DIRECTION:\n• Cinematic editorial color grade for an architectural exterior.\n• Slight warm tint in shadows, neutral midtones, controlled highlight rolloff.\n• Sky density preserved.\n• Subtle 35mm film grain.\n• Photorealistic. Colorist's grade over a real photograph.",
+          "parameters": { "aspect_ratio": "16:9", "output_format": "png" }
+        }
+      ],
+      "video_pass": {
+        "model": "local/depthflow/slow_dolly_out",
+        "prompt": "Architecture-locked subtle pull-back. Depth-reprojected.",
+        "duration_sec": 6,
+        "start_frame_source": "image_pipeline.last",
+        "end_frame_source": null,
+        "extra_args": {}
+      },
+      "clip_post": { "trim_in_ms": 0, "trim_out_ms": 0, "speed": 1.0, "fade_in_ms": 0, "fade_out_ms": 1500 }
     }
   ],
 
