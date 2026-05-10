@@ -158,6 +158,7 @@ export default function Home() {
           templateSummary={selectedTemplateSummary!}
           photos={photos}
           selectedProjectName={selectedProject?.name ?? null}
+          selectedProjectSlug={selectedProjectSlug}
           onBackToProjects={handleResetTemplate}
         />
       )}

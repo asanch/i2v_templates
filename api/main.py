@@ -22,9 +22,19 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from api.jobs import (
+    DEFAULT_GENERATIVE_VIDEO_MODEL,
+    DEFAULT_VIDEO_DURATION_SEC,
+    JobRecord,
+    create_job,
+    get_job,
+    run_slot_job,
+)
 
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
@@ -246,3 +256,58 @@ def get_template(template_id: str) -> dict:
         if t.get("template", {}).get("id") == template_id or path.stem == template_id:
             return t
     raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+
+
+# ─── Jobs ───────────────────────────────────────────────────────────────────
+
+
+class RunSlotRequest(BaseModel):
+    project_slug: str
+    template_id: str
+    slot_id: str
+    generative_video_model: str | None = None  # default Kling 3.0 Pro per jobs.DEFAULT
+    video_duration: int | None = None
+
+
+@app.post("/jobs/run-slot")
+def jobs_run_slot(req: RunSlotRequest, background: BackgroundTasks) -> JobRecord:
+    """Start a single-slot generation. Returns the freshly-created job
+    record; poll GET /jobs/{id} to follow progress.
+
+    Validates the project exists and the slot is non-empty, but defers all
+    other checks (slot inactivity, missing photos, etc.) to the worker so
+    they surface as job errors rather than HTTP errors.
+    """
+    # Surface "project not found" as 400 immediately instead of letting it
+    # blow up inside the worker — easier debugging.
+    try:
+        _resolve_project(req.project_slug)
+    except HTTPException:
+        raise
+
+    job = create_job(
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+        slot_id=req.slot_id,
+        kind="run-slot",
+    )
+    background.add_task(
+        run_slot_job,
+        job.id,
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+        slot_id=req.slot_id,
+        generative_video_model=(
+            req.generative_video_model or DEFAULT_GENERATIVE_VIDEO_MODEL
+        ),
+        video_duration=req.video_duration or DEFAULT_VIDEO_DURATION_SEC,
+    )
+    return job
+
+
+@app.get("/jobs/{job_id}")
+def jobs_get(job_id: str) -> JobRecord:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    return job
