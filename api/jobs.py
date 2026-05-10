@@ -724,6 +724,36 @@ def list_audio_tracks() -> list[dict]:
     return out
 
 
+def _probe_total_duration(video_paths: list[Path]) -> float:
+    """Sum the duration of every clip via ffprobe. Used to pin the export
+    output to an exact length with `-t`, rather than relying on `-shortest`
+    which rounds DOWN to the nearest AAC frame boundary and produces an
+    audio stream metadata duration ~80ms shorter than the video. macOS
+    native players (QuickTime, Finder QuickLook) treat that mismatch as a
+    malformed audio track and silently drop it.
+    """
+    total = 0.0
+    for p in video_paths:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                str(p),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffprobe failed on {p}: {proc.stderr}")
+        try:
+            total += float(proc.stdout.strip())
+        except ValueError:
+            raise RuntimeError(f"ffprobe returned non-numeric duration for {p}: {proc.stdout!r}")
+    return total
+
+
 def _ffmpeg_concat_with_optional_audio(
     *,
     slot_video_paths: list[Path],
@@ -758,6 +788,9 @@ def _ffmpeg_concat_with_optional_audio(
         # Silent export. Take only the video stream from the concat;
         # `-an` ensures no audio stream sneaks through even if some
         # slot clips have baked-in audio while others don't.
+        # `-movflags +faststart` moves the moov atom to the front so
+        # macOS native players (QuickTime, Finder QuickLook) can read
+        # the file as a stream instead of needing the full body first.
         cmd = [
             "ffmpeg",
             "-y",
@@ -767,13 +800,29 @@ def _ffmpeg_concat_with_optional_audio(
             "-map", "0:v:0",
             "-c:v", "copy",
             "-an",
+            "-movflags", "+faststart",
             str(output_path),
         ]
     else:
-        # User picked a track. -map 0:v:0 + -map 1:a:0 explicitly drops
-        # any audio that came from the slot videos and replaces it with
-        # the music. Audio is re-encoded to AAC for mp4-compat; video
-        # stream-copies (no quality loss).
+        # User picked a track. Multi-step audio handling to make the
+        # output play correctly EVERYWHERE (not just browsers):
+        #
+        #   1. Pre-probe total video duration so we can pin the output
+        #      with -t exactly. -shortest rounds DOWN to the last full
+        #      AAC frame, leaving audio metadata ~80ms shorter than
+        #      video. macOS native players treat that as a malformed
+        #      audio track and silently drop it (Chrome is forgiving).
+        #   2. -stream_loop -1 — loop the audio source so we have
+        #      enough material no matter how short the music is.
+        #   3. apad — pad with silence after the loop so trimming with
+        #      -t never falls in a gap.
+        #   4. -t <duration> — force exact output length on every
+        #      stream, so the audio tkhd matches mvhd exactly.
+        #   5. -ar 48000 -ac 2 -profile:a aac_low — universal AAC-LC
+        #      48 kHz stereo, the de facto mp4-video standard.
+        #   6. -movflags +faststart — moov atom at the front so the
+        #      file is readable as a stream by all players.
+        total_duration = _probe_total_duration(slot_video_paths)
         cmd = [
             "ffmpeg",
             "-y",
@@ -786,8 +835,13 @@ def _ffmpeg_concat_with_optional_audio(
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
+            "-profile:a", "aac_low",
             "-b:a", "192k",
-            "-shortest",
+            "-ar", "48000",
+            "-ac", "2",
+            "-af", "apad",
+            "-t", f"{total_duration:.3f}",
+            "-movflags", "+faststart",
             str(output_path),
         ]
 
