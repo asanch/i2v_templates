@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
@@ -86,9 +87,19 @@ def _project_dirs() -> list[Path]:
 
 
 def _resolve_project(slug: str) -> Path:
-    """Find a project dir by slug. 404 if not found."""
-    for p in _project_dirs():
-        if _slugify(p.name) == slug:
+    """Find a project dir by slug, including empty ones. 404 if not found.
+
+    Does NOT require photos to be present — a freshly-created project
+    folder (POST /projects, before photos have been uploaded) needs to be
+    addressable so the subsequent upload call can target it. The gallery
+    list endpoint still uses _project_dirs() which filters on photo
+    presence, so empty placeholders don't appear in the UI until the
+    upload populates them.
+    """
+    if not INPUTS_ROOT.exists():
+        raise HTTPException(status_code=404, detail="inputs/ root missing")
+    for p in sorted(INPUTS_ROOT.iterdir()):
+        if p.is_dir() and _slugify(p.name) == slug:
             return p
     raise HTTPException(status_code=404, detail=f"Project '{slug}' not found")
 
@@ -291,6 +302,10 @@ class RunSlotRequest(BaseModel):
     # specific model for ALL slots regardless of strategy.
     generative_video_model: str | None = None
     video_duration: int | None = None
+    # When true, skip end-frame synthesis entirely and send only the start
+    # frame to the video model. Useful when start↔end interpolation produces
+    # artifacts on a particular slot.
+    disable_end_frame: bool = False
 
 
 @app.post("/jobs/run-slot")
@@ -324,6 +339,7 @@ def jobs_run_slot(req: RunSlotRequest, background: BackgroundTasks) -> JobRecord
         image_model=req.image_model,
         generative_video_model=req.generative_video_model,
         video_duration=req.video_duration or DEFAULT_VIDEO_DURATION_SEC,
+        disable_end_frame=req.disable_end_frame,
     )
     return job
 
@@ -576,6 +592,56 @@ def get_project_exports(slug: str, template_id: str | None = None) -> list[dict]
     """
     _resolve_project(slug)
     return list_exports(slug, template_id=template_id)
+
+
+@app.delete("/projects/{slug}")
+def delete_project(slug: str) -> dict:
+    """Permanently delete a project: removes inputs/<folder>, outputs/<slug>,
+    and any per-slot job records that referenced this project. Plan cache
+    is invalidated.
+
+    Hackathon-grade: no soft-delete, no recycle bin. The frontend confirms
+    with the user before calling this.
+    """
+    project_dir = _resolve_project(slug)
+    project_outputs = OUTPUTS_ROOT / slug
+
+    # 1. Remove the input dir (photos + meta.json).
+    try:
+        shutil.rmtree(project_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to remove inputs/{project_dir.name}: {exc}",
+        )
+
+    # 2. Remove rendered outputs (slot videos, exports, frames, etc).
+    if project_outputs.exists():
+        try:
+            shutil.rmtree(project_outputs)
+        except OSError as exc:
+            # Don't fail the whole delete if outputs cleanup partially fails;
+            # the inputs are gone, so the project is functionally deleted.
+            print(f"[delete] outputs cleanup failed: {exc}")
+
+    # 3. Remove per-slot JobRecord files that reference this project so the
+    #    studio doesn't try to surface stale renders if the user re-creates
+    #    a project with the same slug later.
+    from api.jobs import JOBS_DIR, invalidate_plan_cache, JobRecord
+    if JOBS_DIR.exists():
+        for path in JOBS_DIR.glob("*.json"):
+            try:
+                rec = JobRecord.model_validate_json(path.read_text())
+            except Exception:
+                continue
+            if rec.project_slug == slug:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    invalidate_plan_cache(slug)
+    return {"deleted": slug, "ok": True}
 
 
 @app.post("/projects/{slug}/photos")

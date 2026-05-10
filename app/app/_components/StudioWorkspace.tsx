@@ -46,6 +46,11 @@ type Props = {
    *  button's enable rule and is reported up so TopNav can disable its
    *  Export Video button when the project isn't ready. */
   setCanExport?: (canExport: boolean) => void;
+  /** A walkthrough job kicked off outside the studio (typically by the
+   *  Create-by-Style auto-pipeline). When non-null on mount, the studio
+   *  adopts it as its templateJob so progress shows immediately instead
+   *  of the user having to hit Generate again. */
+  initialTemplateJobId?: string | null;
 };
 
 /** What the center video/image area is currently displaying. */
@@ -77,6 +82,7 @@ export default function StudioWorkspace({
   onProjectCreated,
   exportTriggerRef,
   setCanExport,
+  initialTemplateJobId,
 }: Props) {
   const [slotJobs, setSlotJobs] = useState<Record<string, string>>({});
   // playerSource drives what's in the center video/image area: a slot's
@@ -116,6 +122,14 @@ export default function StudioWorkspace({
   const [selectedImageModel, setSelectedImageModel] = useState<string | null>(null);
   const [selectedVideoModel, setSelectedVideoModel] = useState<string | null>(null);
 
+  // Per-slot "skip end frame" overrides. Set in the Info tab. The flag
+  // applies to the next regenerate (or first run) of that slot only — not
+  // to walkthrough exports, which always reuse whatever the slot's last
+  // successful render produced.
+  const [endFrameDisabledSlots, setEndFrameDisabledSlots] = useState<
+    Record<string, boolean>
+  >({});
+
   // On project / template change: reset state, seed slot jobs from any
   // previously-completed runs (so videos persist across navigations), try
   // to load cached plan, and kick off classify if no cache exists. Also
@@ -126,7 +140,11 @@ export default function StudioWorkspace({
     setStartError(null);
     setPlan(null);
     setClassifyJobId(null);
-    setTemplateJobId(null);
+    // Adopt any walkthrough job that was kicked off outside the studio
+    // (e.g. by the Create-by-Style auto-pipeline). When the user lands
+    // here, the green progress banner shows up immediately instead of
+    // them needing to hit Generate.
+    setTemplateJobId(initialTemplateJobId ?? null);
     setExports([]);
 
     if (!selectedProjectSlug || !templateSummary.enabled) return;
@@ -177,6 +195,7 @@ export default function StudioWorkspace({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectSlug, template.template.id, templateSummary.enabled]);
 
   // Audio tracks: fetch once on mount, refresh after every upload. Survives
@@ -318,6 +337,7 @@ export default function StudioWorkspace({
         slot_id: slot.id,
         image_model: selectedImageModel,
         generative_video_model: selectedVideoModel,
+        disable_end_frame: endFrameDisabledSlots[slot.id] === true,
       });
       setSlotJobs((prev) => ({ ...prev, [slot.id]: job.id }));
     } catch (err) {
@@ -536,6 +556,13 @@ export default function StudioWorkspace({
         selectedVideoModel={selectedVideoModel}
         onSelectImageModel={setSelectedImageModel}
         onSelectVideoModel={setSelectedVideoModel}
+        endFrameDisabledSlots={endFrameDisabledSlots}
+        onToggleEndFrameDisabled={(slotId, disabled) =>
+          setEndFrameDisabledSlots((prev) => ({
+            ...prev,
+            [slotId]: disabled,
+          }))
+        }
       />
     </main>
   );
@@ -1314,6 +1341,8 @@ function RightPanel({
   selectedVideoModel,
   onSelectImageModel,
   onSelectVideoModel,
+  endFrameDisabledSlots,
+  onToggleEndFrameDisabled,
 }: {
   template: TemplateFull;
   slotJobs: Record<string, string>;
@@ -1336,6 +1365,8 @@ function RightPanel({
   selectedVideoModel: string | null;
   onSelectImageModel: (id: string | null) => void;
   onSelectVideoModel: (id: string | null) => void;
+  endFrameDisabledSlots: Record<string, boolean>;
+  onToggleEndFrameDisabled: (slotId: string, disabled: boolean) => void;
 }) {
   const selectedJobId = selectedSlotId ? slotJobs[selectedSlotId] ?? null : null;
   const { job } = useJob(selectedJobId);
@@ -1380,6 +1411,12 @@ function RightPanel({
                 slotId={selectedSlotId}
                 onPreviewImage={onPreviewImage}
                 onRegenerateSlot={onRegenerateSlot}
+                endFrameDisabled={
+                  endFrameDisabledSlots[selectedSlotId] === true
+                }
+                onToggleEndFrameDisabled={(disabled) =>
+                  onToggleEndFrameDisabled(selectedSlotId, disabled)
+                }
               />
             ) : (
               <TemplateDetails template={template} />
@@ -1799,12 +1836,16 @@ function SelectedSlotDetails({
   slotId,
   onPreviewImage,
   onRegenerateSlot,
+  endFrameDisabled,
+  onToggleEndFrameDisabled,
 }: {
   template: TemplateFull;
   job: JobRecord;
   slotId: string;
   onPreviewImage: (url: string, label: string) => void;
   onRegenerateSlot: (slot: SlotDefinition) => void;
+  endFrameDisabled: boolean;
+  onToggleEndFrameDisabled: (disabled: boolean) => void;
 }) {
   const slot = template.slots.find((s) => s.id === slotId);
   // Show Regenerate only once the slot has finished one way or another —
@@ -1882,6 +1923,7 @@ function SelectedSlotDetails({
                 url={job.start_frame_url}
                 label="start"
                 onPreviewImage={onPreviewImage}
+                dimmed={false}
               />
             )}
             {job.end_frame_url && (
@@ -1889,9 +1931,31 @@ function SelectedSlotDetails({
                 url={job.end_frame_url}
                 label="end"
                 onPreviewImage={onPreviewImage}
+                dimmed={endFrameDisabled}
               />
             )}
           </div>
+          {/* Per-slot toggle: when on, the next regenerate skips end-frame
+              synthesis entirely and sends only the start frame to the video
+              model. Useful when start↔end interpolation is producing
+              artifacts (warping, geometry shifts) for this scene. */}
+          <label className="mt-2 flex cursor-pointer items-start gap-2 rounded border border-neutral-800 bg-neutral-950 px-2.5 py-2 text-[11px] text-neutral-300 transition hover:border-neutral-700">
+            <input
+              type="checkbox"
+              checked={endFrameDisabled}
+              onChange={(e) => onToggleEndFrameDisabled(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-blue-600"
+            />
+            <span className="flex-1 leading-snug">
+              <span className="font-medium text-neutral-100">
+                Skip end frame on next regenerate
+              </span>
+              <span className="block text-[10px] text-neutral-500">
+                Send only the start frame to the video model. Try this when
+                the start→end interpolation is warping or producing artifacts.
+              </span>
+            </span>
+          </label>
         </div>
       )}
 
@@ -1932,17 +1996,25 @@ function FramePreview({
   url,
   label,
   onPreviewImage,
+  dimmed = false,
 }: {
   url: string;
   label: string;
   onPreviewImage: (url: string, label: string) => void;
+  dimmed?: boolean;
 }) {
   const fullUrl = backendURL(url);
   return (
     <button
       onClick={() => onPreviewImage(fullUrl, `${label} frame`)}
-      className="group overflow-hidden rounded-md bg-neutral-800 ring-1 ring-transparent transition hover:ring-blue-500"
-      title={`Preview ${label} frame`}
+      className={`group overflow-hidden rounded-md bg-neutral-800 ring-1 ring-transparent transition hover:ring-blue-500 ${
+        dimmed ? "opacity-40" : ""
+      }`}
+      title={
+        dimmed
+          ? `${label} frame disabled — won't be sent on next regenerate`
+          : `Preview ${label} frame`
+      }
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -1951,7 +2023,7 @@ function FramePreview({
         className="aspect-video w-full object-cover transition group-hover:scale-[1.02]"
       />
       <p className="px-2 py-1 text-center text-[10px] uppercase tracking-wider text-neutral-500">
-        {label}
+        {dimmed ? `${label} (skipped)` : label}
       </p>
     </button>
   );

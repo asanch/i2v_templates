@@ -307,6 +307,7 @@ def _render_slot_pipeline(
     image_model: str | None = None,
     generative_video_model: str | None = None,
     video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
+    disable_end_frame: bool = False,
     progress: Callable[[str, int, str, dict | None], None] | None = None,
 ) -> _SlotRenderResult:
     """Render one slot end-to-end. Internal helper shared by `run_slot_job`
@@ -320,6 +321,10 @@ def _render_slot_pipeline(
         regardless of strategy (overrides DepthFlow presets too). When None,
         Kling 3.0 Pro is used for keyframe-interpolation slots and the
         slot's template-defined model is used otherwise.
+      • disable_end_frame: when True, skip end-frame synthesis entirely and
+        send only the start frame to the video model. Used by the per-slot
+        "Skip end frame" toggle in the studio when a slot's interpolation
+        between start↔end is producing artifacts.
     """
 
     def _emit(status: str, pct: int, msg: str, extra: dict | None = None) -> None:
@@ -380,7 +385,13 @@ def _render_slot_pipeline(
 
     # ─── Step 2: end frame synthesis ────────────────────────────────
     end_frame_path: str | None = None
-    if assignment.end_frame_strategy == "real_reference" and assignment.end_frame_photo_path:
+    if disable_end_frame:
+        _emit(
+            "end_frame",
+            55,
+            "End frame skipped (per-slot override) — using start frame only",
+        )
+    elif assignment.end_frame_strategy == "real_reference" and assignment.end_frame_photo_path:
         _emit("end_frame", 55, "Style-matching the alternate photo as end frame")
         end_dir = out_dir / "end_frame_real"
         end_meta = synthesize_end_frame_real_reference(
@@ -430,14 +441,28 @@ def _render_slot_pipeline(
             video_pass_spec=slot.video_pass.model_copy(
                 update={
                     "prompt": (
-                        f"Smooth cinematic camera move interpolating naturally between "
-                        f"two keyframes of the same {slot.label.lower()}. The motion "
-                        f"should feel like a real camera tracking from the start view "
-                        f"to the end view — not a cut, not a morph. Preserve all "
-                        f"architectural details, materials, fixtures, and lighting from "
-                        f"both keyframes exactly. No new windows, doors, or fixtures "
-                        f"appearing in the interpolated frames. Photorealistic editorial "
-                        f"film style, neutral white balance, no abrupt transitions."
+                        # Anti-handheld language is load-bearing here. The
+                        # earlier wording ("feel like a real camera tracking")
+                        # was making Kling 3.0 produce phone-in-hand bounce —
+                        # vertical wobble at walking cadence, slight roll on
+                        # every step. Explicit "dolly on a fixed rail or
+                        # tripod-stabilized slider" + the negative list
+                        # cleared it up.
+                        f"Smooth cinematic dolly move on a fixed rail or "
+                        f"tripod-stabilized slider, interpolating between two "
+                        f"keyframes of the same {slot.label.lower()}. The "
+                        f"camera is mechanically stabilized: NO handheld "
+                        f"motion, NO camera shake, NO walking footstep "
+                        f"cadence, NO vertical bounce, NO rotational wobble, "
+                        f"NO rolling-shutter jello. The motion is a single "
+                        f"continuous translation (or smooth dolly arc) at "
+                        f"constant velocity from the start view to the end "
+                        f"view — not a cut, not a morph. Preserve all "
+                        f"architectural details, materials, fixtures, and "
+                        f"lighting from both keyframes exactly. No new "
+                        f"windows, doors, or fixtures appearing in the "
+                        f"interpolated frames. Photorealistic editorial film "
+                        f"style, neutral white balance, no abrupt transitions."
                     )
                 }
             ),
@@ -513,6 +538,7 @@ def run_slot_job(
     image_model: str | None = None,
     generative_video_model: str | None = None,
     video_duration: int = DEFAULT_VIDEO_DURATION_SEC,
+    disable_end_frame: bool = False,
 ) -> None:
     """Synchronous worker that runs one slot end-to-end and threads progress
     back through update_job(). Raises are caught and surfaced as the job's
@@ -547,6 +573,7 @@ def run_slot_job(
             image_model=image_model,
             generative_video_model=generative_video_model,
             video_duration=video_duration,
+            disable_end_frame=disable_end_frame,
             progress=_progress,
         )
 
@@ -703,14 +730,23 @@ def _ffmpeg_concat_with_optional_audio(
     audio_path: Path | None,
     output_path: Path,
 ) -> None:
-    """Concat slot mp4s losslessly via ffmpeg's concat demuxer; if `audio_path`
-    is given, replace any existing audio track with it (looped to length of
-    the video and trimmed via -shortest so the output is the video duration).
+    """Concat slot mp4s losslessly via ffmpeg's concat demuxer.
 
-    Hackathon-grade: assumes all slot videos share resolution / fps / codec,
-    which they do because they're all produced by Kling 3.0 (or DepthFlow)
-    rendered to the same template settings. If they ever diverge, switch to
-    the slower `-filter_complex concat` form.
+    Audio policy: ANY audio baked into the slot videos is stripped. Some
+    video models (Veo 3 with audio enabled, Seedance variants, etc.) may
+    bake in their own audio — we always discard it and either replace
+    with the user-selected music track or leave the export silent.
+
+    • audio_path is None → silent export. We explicitly map only the
+      video stream from input 0 (`-map 0:v:0`) and drop everything else
+      with `-an`.
+    • audio_path is set → mux the music on top, looped via
+      `-stream_loop -1` and trimmed with `-shortest` so the audio
+      matches the video duration regardless of track length.
+
+    Hackathon-grade: assumes all slot videos share resolution / fps /
+    codec, which they do because they all come from Kling 3.0 or
+    DepthFlow rendered to the same template settings.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     list_file = output_path.parent / "concat.txt"
@@ -719,18 +755,25 @@ def _ffmpeg_concat_with_optional_audio(
     )
 
     if audio_path is None:
+        # Silent export. Take only the video stream from the concat;
+        # `-an` ensures no audio stream sneaks through even if some
+        # slot clips have baked-in audio while others don't.
         cmd = [
             "ffmpeg",
             "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", str(list_file),
-            "-c", "copy",
+            "-map", "0:v:0",
+            "-c:v", "copy",
+            "-an",
             str(output_path),
         ]
     else:
-        # Stream-copy video; loop the audio so a short track stretches over a
-        # long walkthrough; trim to whichever is shortest (the video).
+        # User picked a track. -map 0:v:0 + -map 1:a:0 explicitly drops
+        # any audio that came from the slot videos and replaces it with
+        # the music. Audio is re-encoded to AAC for mp4-compat; video
+        # stream-copies (no quality loss).
         cmd = [
             "ffmpeg",
             "-y",

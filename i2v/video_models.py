@@ -57,6 +57,30 @@ class VideoModelAdapter:
         return max(self.min_duration, min(self.max_duration, requested))
 
 
+# ─── Shared anti-handheld defaults ──────────────────────────────────────────
+# Empirically, Kling and similar i2v models default to phone-in-hand bounce
+# (vertical wobble at walking cadence + slight roll on every step) because
+# their training distribution is dominated by social-media handheld footage.
+# Positive-prompt language alone ("smooth dolly", "tripod-stabilized") gets
+# overridden by the prior. Two levers actually move the needle:
+#   1. negative_prompt — Kling honors it strongly; concepts listed here are
+#      pushed AWAY from in classifier-free guidance. Much more reliable than
+#      stuffing the same words into the positive prompt with "no" / "NO".
+#   2. cfg_scale — prompt-adherence dial. Default is ~0.5; bumping to 0.8
+#      forces the model to obey explicit instructions instead of drifting
+#      toward training-distribution defaults.
+
+_HANDHELD_NEGATIVE_PROMPT = (
+    "handheld camera, handheld footage, camera shake, camera bounce, "
+    "vertical wobble, rotational wobble, walking motion, footstep cadence, "
+    "rolling shutter, jello effect, lens distortion, motion blur, "
+    "vlog style, phone footage, amateur footage, drone wobble, "
+    "abrupt cuts, morphing, warping, geometry shifts"
+)
+
+_KLING_PROMPT_ADHERENCE_CFG = 0.8  # default ~0.5; pushes obedience to explicit prompts
+
+
 # ─── Default adapters ────────────────────────────────────────────────────────
 
 
@@ -198,7 +222,11 @@ KNOWN_VIDEO_MODELS: tuple[VideoModelAdapter, ...] = (
         max_duration=10,
         allowed_durations=(5, 10),
         supports_end_frame=True,
-        default_extra_args={"generate_audio": False},
+        default_extra_args={
+            "generate_audio": False,
+            "negative_prompt": _HANDHELD_NEGATIVE_PROMPT,
+            "cfg_scale": _KLING_PROMPT_ADHERENCE_CFG,
+        },
         build_arguments=_kling_build_arguments,
         extract_output_url=_default_extract_video_url,
     ),
@@ -215,7 +243,11 @@ KNOWN_VIDEO_MODELS: tuple[VideoModelAdapter, ...] = (
         max_duration=10,
         allowed_durations=(5, 10),
         supports_end_frame=True,
-        default_extra_args={"generate_audio": False},
+        default_extra_args={
+            "generate_audio": False,
+            "negative_prompt": _HANDHELD_NEGATIVE_PROMPT,
+            "cfg_scale": _KLING_PROMPT_ADHERENCE_CFG,
+        },
         build_arguments=_kling_build_arguments,
         extract_output_url=_default_extract_video_url,
     ),
@@ -234,7 +266,11 @@ KNOWN_VIDEO_MODELS: tuple[VideoModelAdapter, ...] = (
         max_duration=10,
         allowed_durations=(5, 10),
         supports_end_frame=True,
-        default_extra_args={"generate_audio": False},
+        default_extra_args={
+            "generate_audio": False,
+            "negative_prompt": _HANDHELD_NEGATIVE_PROMPT,
+            "cfg_scale": _KLING_PROMPT_ADHERENCE_CFG,
+        },
         build_arguments=_kling3_build_arguments,
         extract_output_url=_default_extract_video_url,
     ),
@@ -288,7 +324,12 @@ KNOWN_VIDEO_MODELS: tuple[VideoModelAdapter, ...] = (
         max_duration=10,
         allowed_durations=(5, 10),
         supports_end_frame=True,
-        default_extra_args={},
+        default_extra_args={
+            # Seedance honors the same anti-handheld concept tags as Kling.
+            # cfg_scale is intentionally omitted — Seedance v2 uses a different
+            # adherence parameter; sending Kling's would be ignored or 422.
+            "negative_prompt": _HANDHELD_NEGATIVE_PROMPT,
+        },
         build_arguments=_seedance2_build_arguments,
         extract_output_url=_default_extract_video_url,
     ),

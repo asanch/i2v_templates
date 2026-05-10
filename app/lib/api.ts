@@ -164,6 +164,10 @@ export type RunSlotRequest = {
   image_model?: string | null;
   generative_video_model?: string | null;
   video_duration?: number;
+  /** When true, the worker skips end-frame synthesis and sends only the
+   *  start frame to the video model. Used to recover from bad start↔end
+   *  interpolation on a single slot. */
+  disable_end_frame?: boolean;
 };
 
 export async function runSlot(req: RunSlotRequest): Promise<JobRecord> {
@@ -243,6 +247,20 @@ export async function fetchSlotResults(
   return fetchJSON<Record<string, JobRecord>>(
     `/projects/${encodeURIComponent(project_slug)}/slot-results?template_id=${encodeURIComponent(template_id)}`,
   );
+}
+
+/** Permanently delete a project — removes inputs/<folder>, outputs/<slug>,
+ *  and any per-slot job records. The frontend confirms with the user
+ *  before calling this; backend doesn't soft-delete. */
+export async function deleteProject(slug: string): Promise<void> {
+  const res = await fetch(
+    `${BACKEND_URL}/projects/${encodeURIComponent(slug)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`DELETE /projects/${slug} → ${res.status}: ${text}`);
+  }
 }
 
 /** Create a new project folder under inputs/. Used by the new-from-blank
