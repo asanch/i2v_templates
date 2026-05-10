@@ -71,6 +71,32 @@ from i2v.video_pass import run_video_pass
     type=int,
     help="If set, override the template's duration_sec (clamped to model limits).",
 )
+@click.option(
+    "--override-intensity",
+    default=None,
+    type=float,
+    help="DepthFlow only: override the preset's intensity (DepthFlow range 0-4). "
+    "Higher = camera moves further. Speed = intensity / duration; for 'further AND "
+    "faster' raise intensity and keep duration short. Sign is preserved (the "
+    "slow_dolly_out preset stays a pull-back).",
+)
+@click.option(
+    "--override-steady",
+    default=None,
+    type=float,
+    help="DepthFlow only: override the --steady value (range -1..2). Lower values "
+    "(0.0 to -0.3) anchor the FOREGROUND so the focal subject stretches less; "
+    "higher values anchor the background. Default in presets is ~0.3.",
+)
+@click.option(
+    "--overscan",
+    "overscan_pct",
+    default=0.10,
+    show_default=True,
+    type=float,
+    help="DepthFlow only: render at this fraction larger then ffmpeg-crop the "
+    "stretched edges. 0.10 = render 10%% larger, crop back. Set to 0 to disable.",
+)
 @click.option("--with-logs/--no-logs", default=True)
 def main(
     template_path: str,
@@ -80,6 +106,9 @@ def main(
     output_root: str,
     override_model: str | None,
     override_duration: int | None,
+    override_intensity: float | None,
+    override_steady: float | None,
+    overscan_pct: float,
     with_logs: bool,
 ) -> None:
     template = load_template(template_path)
@@ -119,6 +148,9 @@ def main(
         with_logs=with_logs,
         model_override=override_model,
         duration_override=override_duration,
+        intensity_override=override_intensity,
+        steady_override=override_steady,
+        overscan_pct=overscan_pct,
     )
 
     click.echo("\nDONE")

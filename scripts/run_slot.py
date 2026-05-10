@@ -94,6 +94,29 @@ from i2v.video_pass import run_video_pass
     help="When using --include-video, override the slot's clip duration (clamped to model limits).",
 )
 @click.option(
+    "--override-video-intensity",
+    default=None,
+    type=float,
+    help="DepthFlow only: override the preset's intensity (range 0-4). "
+    "Higher = camera moves further; for faster motion combine with shorter duration.",
+)
+@click.option(
+    "--override-video-steady",
+    default=None,
+    type=float,
+    help="DepthFlow only: override the --steady anchor (-1..2). Lower (0 to -0.3) "
+    "anchors foreground; higher anchors background.",
+)
+@click.option(
+    "--video-overscan",
+    "video_overscan_pct",
+    default=0.10,
+    show_default=True,
+    type=float,
+    help="DepthFlow only: fraction larger to render before center-cropping. "
+    "0.10 hides edge stretching with no quality loss. Set 0 to disable.",
+)
+@click.option(
     "--with-logs/--no-logs",
     default=True,
     help="Stream fal logs to stdout while passes run.",
@@ -108,6 +131,9 @@ def main(
     include_video: bool,
     override_video_model: str | None,
     override_video_duration: int | None,
+    override_video_intensity: float | None,
+    override_video_steady: float | None,
+    video_overscan_pct: float,
     with_logs: bool,
 ) -> None:
     template = load_template(template_path)
@@ -173,6 +199,9 @@ def main(
         with_logs=with_logs,
         model_override=override_video_model,
         duration_override=override_video_duration,
+        intensity_override=override_video_intensity,
+        steady_override=override_video_steady,
+        overscan_pct=video_overscan_pct,
     )
 
     click.echo("\nVIDEO PASS DONE")

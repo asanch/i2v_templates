@@ -173,6 +173,11 @@ class TemplateMeta(BaseModel):
     aspect_ratio: Literal["16:9", "9:16", "4:5", "1:1"]
     resolution: str
     fps: Literal[24, 25, 30, 60]
+    # UI metadata — optional. `thumbnail` is a path or URL the studio gallery
+    # tile renders. `enabled` lets us ship stub templates that show in the
+    # gallery for the demo but don't actually run.
+    thumbnail: str | None = None
+    enabled: bool = True
 
 
 class Transition(BaseModel):

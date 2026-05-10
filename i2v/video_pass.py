@@ -31,6 +31,7 @@ import click
 import httpx
 
 from i2v import fal_client
+from i2v.depth_video import run_depthflow
 from i2v.types import VideoPass, VideoPassResult
 from i2v.video_models import VideoModelAdapter, resolve_video_model
 
@@ -77,6 +78,9 @@ def run_video_pass(
     with_logs: bool = False,
     model_override: str | None = None,
     duration_override: int | None = None,
+    intensity_override: float | None = None,
+    steady_override: float | None = None,
+    overscan_pct: float = 0.10,
 ) -> VideoPassResult:
     """Run one image-to-video generation.
 
@@ -115,6 +119,54 @@ def run_video_pass(
             f"(model {model_id} allows {adapter.allowed_durations or f'{adapter.min_duration}-{adapter.max_duration}'})"
         )
 
+    # ─── Local backend dispatch (DepthFlow et al.) ─────────────────────────
+    # Local backends don't talk to fal at all. They run on Aaron's machine,
+    # take the input image and a preset, and produce the mp4 directly. The
+    # VideoPassResult shape stays the same so downstream code doesn't care.
+    if adapter.backend == "local":
+        if model_id.startswith("local/depthflow/"):
+            preset = adapter.default_extra_args.get("preset")
+            if not preset:
+                raise ValueError(
+                    f"Local depthflow model {model_id} has no 'preset' in default_extra_args"
+                )
+            df_meta = run_depthflow(
+                input_image_path=in_path,
+                output_dir=out_dir,
+                preset=preset,
+                duration_sec=duration_sec,
+                fps=24,
+                width=1920,
+                height=1080,
+                slot_id=slot_id,
+                template_id=template_id,
+                run_id=run_id,
+                intensity_override=intensity_override,
+                steady_override=steady_override,
+                overscan_pct=overscan_pct,
+            )
+            result = VideoPassResult(
+                slot_id=slot_id,
+                template_id=template_id,
+                run_id=run_id,
+                model=model_id,
+                prompt=video_pass_spec.prompt,  # unused by depthflow but kept for audit
+                duration_sec=duration_sec,
+                input_image_path=str(in_path),
+                end_frame_image_path=None,
+                output_path=df_meta["output_path"],
+                output_url=None,
+                duration_wall_sec=df_meta["wall_time_sec"],
+                extra_args={"preset": preset, "preset_params": df_meta["preset_params"]},
+            )
+            _write_video_metadata(out_dir, result.model_dump())
+            return result
+        raise ValueError(
+            f"Local backend declared for {model_id} but no handler is wired. "
+            f"Add a dispatch arm in video_pass.py."
+        )
+
+    # ─── Fal backend (default) ─────────────────────────────────────────────
     # Upload start frame
     print(f"  [video] uploading start frame {in_path.name} to fal...")
     image_url = fal_client.upload_local_file(in_path)
