@@ -63,36 +63,46 @@ function PhotosPanel({
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-auto p-3">
-        <p className="mb-2 shrink-0 text-xs uppercase tracking-wider text-neutral-500">
-          Uploaded media — {projectName ?? "select a project"}
-        </p>
-        {photos.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 p-8 text-center text-xs text-neutral-500">
-            <div className="h-12 w-12 rounded-full border-2 border-dashed border-neutral-700" />
-            <p>No photos in this project.</p>
-            <p>Drop photos in inputs/&lt;project&gt;/ or pick another project.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-2">
-            {photos.map((p) => (
-              <div
-                key={p.url}
-                className="aspect-square overflow-hidden rounded-md bg-neutral-800"
-                title={p.name}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={backendURL(p.url)}
-                  alt={p.name}
-                  className="h-full w-full object-cover"
-                  loading="lazy"
-                />
-              </div>
-            ))}
-            <button className="flex aspect-square items-center justify-center rounded-md border border-dashed border-neutral-700 text-2xl text-neutral-500 hover:border-neutral-500 hover:text-neutral-300">
-              +
-            </button>
-          </div>
+        <div className="grid grid-cols-2 gap-2">
+          {/* Add-photo tile is always the first thumbnail so it's reachable
+              without scrolling. Clicking is a no-op until the upload
+              endpoint lands. */}
+          <button
+            className="flex aspect-square flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-neutral-700 text-neutral-500 transition hover:border-neutral-500 hover:text-neutral-200"
+            title="Add photos"
+          >
+            <span className="text-2xl leading-none">+</span>
+            <span className="text-[10px]">Add photos</span>
+          </button>
+          {photos.map((p) => (
+            <div
+              key={p.url}
+              className="aspect-square overflow-hidden rounded-md bg-neutral-800"
+              title={p.name}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={backendURL(p.url)}
+                alt={p.name}
+                className="h-full w-full object-cover"
+                loading="lazy"
+              />
+            </div>
+          ))}
+        </div>
+        {photos.length === 0 && (
+          <p className="mt-3 text-center text-xs text-neutral-500">
+            {projectName ? (
+              <>
+                Drop photos in{" "}
+                <code className="rounded bg-neutral-800 px-1 py-0.5 text-[11px]">
+                  inputs/{projectName}/
+                </code>
+              </>
+            ) : (
+              <>Click + to add the first photo to this project</>
+            )}
+          </p>
         )}
       </div>
     </aside>
