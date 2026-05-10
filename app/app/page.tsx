@@ -54,7 +54,9 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When the project changes, refresh photos.
+  // When the project changes, refresh photos. We bump a counter to also
+  // re-fetch on demand (after upload completes).
+  const [photosTick, setPhotosTick] = useState(0);
   useEffect(() => {
     if (!selectedProjectSlug) {
       setPhotos([]);
@@ -71,7 +73,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProjectSlug]);
+  }, [selectedProjectSlug, photosTick]);
 
   const selectedProject =
     projects.find((p) => p.slug === selectedProjectSlug) ?? null;
@@ -160,6 +162,17 @@ export default function Home() {
           selectedProjectName={selectedProject?.name ?? null}
           selectedProjectSlug={selectedProjectSlug}
           onBackToProjects={handleResetTemplate}
+          onPhotosChanged={() => setPhotosTick((n) => n + 1)}
+          // After a new project is created via the upload flow, refresh the
+          // projects list and switch the active slug to the new project.
+          onProjectCreated={(newSlug) => {
+            fetchProjects()
+              .then((p) => {
+                setProjects(p);
+                setSelectedProjectSlug(newSlug);
+              })
+              .catch((err) => setLoadError(String(err)));
+          }}
         />
       )}
     </div>

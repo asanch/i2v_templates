@@ -22,7 +22,7 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -32,7 +32,11 @@ from api.jobs import (
     DEFAULT_VIDEO_DURATION_SEC,
     JobRecord,
     create_job,
+    get_cached_plan,
     get_job,
+    invalidate_plan_cache,
+    list_slot_results,
+    run_classify_job,
     run_slot_job,
 )
 
@@ -311,3 +315,139 @@ def jobs_get(job_id: str) -> JobRecord:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job
+
+
+class ClassifyRequest(BaseModel):
+    project_slug: str
+    template_id: str
+
+
+@app.post("/jobs/classify")
+def jobs_classify(req: ClassifyRequest, background: BackgroundTasks) -> JobRecord:
+    """Classify all photos in a project against a template's slot list, build
+    the assignment plan, and cache it. Fired on studio open so the plan is
+    ready by the time the user clicks any slot.
+
+    Idempotent: if the cached plan already matches the current photo set
+    and template, returns a job that completes instantly.
+    """
+    try:
+        _resolve_project(req.project_slug)
+    except HTTPException:
+        raise
+
+    job = create_job(
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+        slot_id=None,
+        kind="classify",
+    )
+    background.add_task(
+        run_classify_job,
+        job.id,
+        project_slug=req.project_slug,
+        template_id=req.template_id,
+    )
+    return job
+
+
+@app.get("/projects/{slug}/plan")
+def get_project_plan(slug: str, template_id: str) -> dict:
+    """Return the cached AssignmentPlan for (project, template) if one
+    exists. 404 if no plan has been built yet (the UI uses this to decide
+    whether to fire a classify job).
+    """
+    _resolve_project(slug)  # 404 if missing project
+    plan = get_cached_plan(slug, template_id)
+    if plan is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached plan for project '{slug}' + template '{template_id}'",
+        )
+    return plan
+
+
+@app.get("/projects/{slug}/slot-results")
+def get_project_slot_results(slug: str, template_id: str) -> dict[str, JobRecord]:
+    """Most-recent successful run per slot for a (project, template).
+    The UI seeds its slotJobs state from this on studio open so previously
+    rendered videos persist across navigations.
+    """
+    _resolve_project(slug)
+    return list_slot_results(slug, template_id)
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    template_id: str | None = None
+
+
+@app.post("/projects")
+def create_project(req: CreateProjectRequest) -> dict:
+    """Create a new project (a subfolder of inputs/) so the UI can name a
+    fresh project and upload photos into it. Sanitizes the name into a
+    folder-safe form, creates the directory, and (optionally) writes a
+    meta.json pinning the template id.
+
+    Returns the project's name + slug + an empty photos list.
+    """
+    raw_name = req.name.strip()
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+    # Folder name: keep alphanumerics + spaces -> underscores. The slug we
+    # return is the URL-safe form (used everywhere else in the API).
+    folder_name = re.sub(r"[^A-Za-z0-9 _.-]", "", raw_name).strip().replace(" ", "_") or "project"
+    target = INPUTS_ROOT / folder_name
+    if target.exists():
+        # If a project by this name exists, just surface it — don't error.
+        # User can decide whether to keep that name or rename and retry.
+        pass
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+    if req.template_id:
+        try:
+            (target / "meta.json").write_text(
+                json.dumps({"template_id": req.template_id}, indent=2)
+            )
+        except OSError:
+            pass
+    return {
+        "name": target.name,
+        "slug": _slugify(target.name),
+        "photo_count": 0,
+        "template_id": req.template_id or DEFAULT_PROJECT_TEMPLATE_ID,
+        "template_name": _project_template_name(req.template_id or DEFAULT_PROJECT_TEMPLATE_ID),
+        "cover_photo_url": None,
+    }
+
+
+@app.post("/projects/{slug}/photos")
+async def upload_photos(slug: str, files: list[UploadFile] = File(...)) -> dict:
+    """Save uploaded photos into inputs/<slug>/. Invalidates the cached
+    classification plan because the photo set has changed; the UI's next
+    classify call will re-run.
+    """
+    project_dir = _resolve_project(slug)
+    saved: list[dict] = []
+    for f in files:
+        if not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_PHOTO_EXTS:
+            continue
+        # Sanitize filename: take basename, prepend timestamp if needed.
+        safe_name = Path(f.filename).name
+        dest = project_dir / safe_name
+        n = 1
+        while dest.exists():
+            dest = project_dir / f"{Path(safe_name).stem}_{n}{ext}"
+            n += 1
+        contents = await f.read()
+        dest.write_bytes(contents)
+        saved.append({
+            "name": dest.name,
+            "url": f"/inputs/{project_dir.name}/{dest.name}",
+            "size_bytes": len(contents),
+        })
+    invalidate_plan_cache(slug)
+    return {"saved": saved, "count": len(saved)}

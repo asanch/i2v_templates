@@ -71,7 +71,7 @@ class JobRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    kind: Literal["run-slot", "run-template"] = "run-slot"
+    kind: Literal["run-slot", "run-template", "classify"] = "run-slot"
 
     project_slug: str
     template_id: str
@@ -116,7 +116,7 @@ def create_job(
     project_slug: str,
     template_id: str,
     slot_id: str | None = None,
-    kind: Literal["run-slot", "run-template"] = "run-slot",
+    kind: Literal["run-slot", "run-template", "classify"] = "run-slot",
 ) -> JobRecord:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job = JobRecord(
@@ -490,3 +490,114 @@ def run_slot_job(
             error=f"{type(exc).__name__}: {exc}",
             message="Failed",
         )
+
+
+# ─── Classify-only worker (fires on studio open, builds the cached plan) ────
+
+
+def run_classify_job(
+    job_id: str,
+    *,
+    project_slug: str,
+    template_id: str,
+) -> None:
+    """Build (or reuse) the assignment plan for a project + template. Surface
+    progress through update_job(). Used when the studio view opens so the
+    plan is ready by the time the user clicks a slot.
+
+    Cheap if the plan is already cached (returns instantly); otherwise this
+    runs N + M Gemini Flash vision calls for N photos and M slots with
+    candidates. Costs cents.
+    """
+    try:
+        update_job(
+            job_id,
+            status="classifying",
+            percent=10,
+            message="Building assignment plan",
+        )
+        plan = _get_or_build_plan(
+            project_slug=project_slug,
+            template_id=template_id,
+        )
+        active = sum(1 for a in plan.slot_assignments if a.is_active)
+        update_job(
+            job_id,
+            status="done",
+            percent=100,
+            message=f"Plan ready · {active}/{len(plan.slot_assignments)} active slots",
+        )
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[job {job_id}] CLASSIFY ERROR: {exc}\n{tb}")
+        update_job(
+            job_id,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+            message="Classification failed",
+        )
+
+
+def list_slot_results(project_slug: str, template_id: str) -> dict[str, JobRecord]:
+    """Most-recent successful slot job per slot for a (project, template).
+
+    Used by the UI on studio open to repopulate the slot strip with previously
+    rendered videos. We scan outputs/jobs/*.json — slow if the user has
+    thousands of jobs, but at hackathon scale it's nothing.
+    """
+    if not JOBS_DIR.exists():
+        return {}
+    by_slot: dict[str, JobRecord] = {}
+    for path in JOBS_DIR.glob("*.json"):
+        try:
+            job = JobRecord.model_validate_json(path.read_text())
+        except Exception:
+            continue
+        if (
+            job.kind != "run-slot"
+            or job.project_slug != project_slug
+            or job.template_id != template_id
+            or job.slot_id is None
+            or job.status != "done"
+            or not job.video_url
+        ):
+            continue
+        prior = by_slot.get(job.slot_id)
+        if prior is None or (job.finished_at or "") > (prior.finished_at or ""):
+            by_slot[job.slot_id] = job
+    return by_slot
+
+
+def invalidate_plan_cache(project_slug: str) -> None:
+    """Drop the cached classification plan for a project. Called when the
+    photo set changes (upload, delete) so the next classify run sees fresh
+    data."""
+    cache_path = _plan_cache_path(project_slug)
+    if cache_path.exists():
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
+
+
+def get_cached_plan(project_slug: str, template_id: str) -> dict | None:
+    """Return the cached plan dict if it exists and matches the current
+    photo set + template, else None."""
+    project_dir = _resolve_project_dir(project_slug)
+    photos = _project_photos(project_dir)
+    if not photos:
+        return None
+    photo_hash = _photos_hash(photos)
+    cache_path = _plan_cache_path(project_slug)
+    if not cache_path.exists():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text())
+        if (
+            cached.get("_photos_hash") == photo_hash
+            and cached.get("_template_id") == template_id
+        ):
+            return cached.get("plan")
+    except Exception:
+        return None
+    return None

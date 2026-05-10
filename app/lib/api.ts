@@ -236,6 +236,25 @@ export async function fetchSlotResults(
   );
 }
 
+/** Create a new project folder under inputs/. Used by the new-from-blank
+ *  flow so the user can name a project, upload photos, and have it appear
+ *  in the project tile gallery. */
+export async function createProject(
+  name: string,
+  template_id?: string,
+): Promise<Project> {
+  const res = await fetch(`${BACKEND_URL}/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, template_id }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST /projects → ${res.status}: ${text}`);
+  }
+  return (await res.json()) as Project;
+}
+
 /** Multipart photo upload. Invalidates the project's cached plan on the
  *  backend, so the caller should re-fetch plan / re-classify after this
  *  resolves. */

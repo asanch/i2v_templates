@@ -245,3 +245,6 @@ app/*.tsbuildinfo
 # MUST be tracked. Without these negations git ignores it globally.
 !app/lib/
 !app/lib/**
+
+
+.DS_Store
