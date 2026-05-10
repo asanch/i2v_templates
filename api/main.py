@@ -74,6 +74,58 @@ def _load_template(template_path: Path) -> dict:
     return json.loads(template_path.read_text())
 
 
+# ─── Project metadata (template association, cover photo) ───────────────────
+
+
+DEFAULT_PROJECT_TEMPLATE_ID = "cinematic-editorial-v1"
+
+
+def _project_template_id(project_dir: Path) -> str:
+    """Read which template a project was created with.
+
+    Looks for inputs/<project>/meta.json with shape {"template_id": "..."}.
+    Falls back to the default template (cinematic-editorial-v1) for projects
+    that pre-date the meta.json convention.
+    """
+    meta_path = project_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text())
+            tid = data.get("template_id")
+            if isinstance(tid, str) and tid:
+                return tid
+        except Exception:
+            pass
+    return DEFAULT_PROJECT_TEMPLATE_ID
+
+
+def _project_template_name(template_id: str) -> str:
+    """Best-effort lookup of a template's display name from its id."""
+    if not TEMPLATES_ROOT.exists():
+        return template_id
+    for path in TEMPLATES_ROOT.glob("*.json"):
+        try:
+            t = _load_template(path)
+        except Exception:
+            continue
+        meta = t.get("template", {})
+        if meta.get("id") == template_id or path.stem == template_id:
+            return meta.get("name", template_id)
+    return template_id
+
+
+def _project_cover_url(project_dir: Path) -> str | None:
+    """Return a URL (relative to backend root) of the first photo in the project,
+    used as the cover thumbnail in the Projects section."""
+    photos = [
+        f for f in sorted(project_dir.iterdir())
+        if f.is_file() and f.suffix.lower() in SUPPORTED_PHOTO_EXTS
+    ]
+    if not photos:
+        return None
+    return f"/inputs/{project_dir.name}/{photos[0].name}"
+
+
 # ─── App ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="i2v_templates studio API", version="0.0.1")
@@ -110,17 +162,26 @@ def health() -> dict:
 
 @app.get("/projects")
 def list_projects() -> list[dict]:
-    """List houses (subfolders of inputs/) the user has uploaded."""
+    """List houses (subfolders of inputs/) the user has uploaded.
+
+    Each project carries the id and display name of the template it was
+    created with, plus a cover photo URL the UI uses as the project tile
+    thumbnail.
+    """
     out = []
     for p in _project_dirs():
         photos = [
             f for f in p.iterdir()
             if f.is_file() and f.suffix.lower() in SUPPORTED_PHOTO_EXTS
         ]
+        template_id = _project_template_id(p)
         out.append({
             "name": p.name,
             "slug": _slugify(p.name),
             "photo_count": len(photos),
+            "template_id": template_id,
+            "template_name": _project_template_name(template_id),
+            "cover_photo_url": _project_cover_url(p),
         })
     return out
 

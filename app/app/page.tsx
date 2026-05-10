@@ -40,14 +40,14 @@ export default function Home() {
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateFull | null>(null);
 
   // Load projects + templates on mount.
+  // We deliberately do NOT auto-select a project. The gallery view should
+  // start blank; project association happens by clicking a Project tile or
+  // by picking a project from the switcher inside the studio view.
   useEffect(() => {
     Promise.all([fetchProjects(), fetchTemplates()])
       .then(([p, t]) => {
         setProjects(p);
         setTemplates(t);
-        if (p.length > 0 && !selectedProjectSlug) {
-          setSelectedProjectSlug(p[0].slug);
-        }
       })
       .catch((err) => setLoadError(String(err)));
     // We intentionally only run this once on mount.
@@ -76,9 +76,35 @@ export default function Home() {
   const selectedProject =
     projects.find((p) => p.slug === selectedProjectSlug) ?? null;
 
+  /**
+   * Clicking a Style tile starts a fresh project — no images yet. Clear any
+   * previously-selected project so the studio opens with an empty photo
+   * panel and prompts the user to add images.
+   */
   const handleSelectTemplate = (t: TemplateSummary) => {
+    setSelectedProjectSlug(null);
     setSelectedTemplateSummary(t);
     fetchTemplate(t.id)
+      .then(setSelectedTemplate)
+      .catch((err) => setLoadError(String(err)));
+  };
+
+  /**
+   * A project tile click opens the studio with both the project AND the
+   * template that project was created with. Look up the template summary
+   * (already loaded) by id; fetch the full template body.
+   */
+  const handleSelectProject = (project: Project) => {
+    setSelectedProjectSlug(project.slug);
+    const summary = templates.find((t) => t.id === project.template_id);
+    if (!summary) {
+      setLoadError(
+        `Project ${project.name} references template ${project.template_id} but that template is missing from /templates response.`
+      );
+      return;
+    }
+    setSelectedTemplateSummary(summary);
+    fetchTemplate(summary.id)
       .then(setSelectedTemplate)
       .catch((err) => setLoadError(String(err)));
   };
@@ -109,19 +135,22 @@ export default function Home() {
     );
   }
 
+  // Fixed-height shell. Top nav is shrink-0, content fills remaining viewport.
+  // The studio view depends on this for its no-scroll layout — children can
+  // safely use `flex-1 min-h-0` to claim a finite height.
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-neutral-950 text-neutral-100">
       <TopNav
-        projects={projects}
-        selectedProjectSlug={selectedProjectSlug}
-        onSelectProject={setSelectedProjectSlug}
         onResetTemplate={handleResetTemplate}
+        showExport={!!selectedTemplate}
       />
 
       {!selectedTemplate ? (
         <TemplateGallery
+          projects={projects}
           templates={templates}
-          onSelect={handleSelectTemplate}
+          onSelectProject={handleSelectProject}
+          onSelectTemplate={handleSelectTemplate}
         />
       ) : (
         <StudioWorkspace
@@ -129,6 +158,7 @@ export default function Home() {
           templateSummary={selectedTemplateSummary!}
           photos={photos}
           selectedProjectName={selectedProject?.name ?? null}
+          onBackToProjects={handleResetTemplate}
         />
       )}
     </div>
