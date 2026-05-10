@@ -1,20 +1,34 @@
-# i2v_templates — photo-to-video pipeline
+# AutoHDR — photo-to-video pipeline
 
-Apply a creative template (image prompts + camera-motion prompts + music + cut timing) to a set of amateur real-estate photos and produce a professional walkthrough video. The template is portable JSON; the runtime is a thin loop over fal.ai image and video models.
+Turn a handful of property photos into a cinematic walkthrough video. Drop in your photos, pick a style, and the system classifies each photo to a slot, applies an editorial-grade image pass, then renders an image-to-video clip per slot — concatenating into one final mp4 with optional music. No prompting required.
 
-This repo holds Phase 1 — **the image layer only**. Given an input photo and a slot from a template, run the slot's `image_pipeline` (a chain of one or two image passes) and write each pass to `outputs/`. This is "shot zero" — prove the template format produces convincing output before scaling to the full video pipeline.
+## Demo
+
+> 🔊 The clip below has audio. Click play.
+
+<video controls poster="assets/demo/walkthrough-poster.jpg" width="100%">
+  <source src="assets/demo/walkthrough.mp4" type="video/mp4">
+  Your browser doesn't support inline video — <a href="assets/demo/walkthrough.mp4">download the walkthrough (15&nbsp;MB MP4, includes audio)</a>.
+</video>
+
+[**▶ Open `assets/demo/walkthrough.mp4` directly**](assets/demo/walkthrough.mp4) (15 MB, 50s, 720p, AAC stereo)
+
+A 50-second walkthrough of [213 Hidden Dune](inputs/213_Hidden_Dune) graded in the **Cinematic Editorial** style. Twelve slots: hero exterior, entry, kitchen wide + 85 mm detail, living, dining, primary bedroom + bath, yard, pool, patio, closing pull-back. Stitched with a Pixabay-licensed score (Ambient Soundscape Piano).
 
 ---
 
 ## Status
 
-- ✅ Template schema with multi-pass image pipeline (`templates/cinematic-editorial-v1.json`)
-- ✅ Provider-agnostic `i2v/image_pass.py` callable as a library or CLI
-- ✅ `scripts/run_slot.py` CLI — runs the full image pipeline for one slot
-- ⬜ Video pass (image-to-video via fal) — next phase
-- ⬜ Concat + music mux via ffmpeg — next phase
-- ⬜ Photo classifier (matches uploaded photos to template slots) — next phase
-- ⬜ Web UI — next phase
+- ✅ Template schema with multi-pass image + video pipeline (`templates/`)
+- ✅ Two enabled styles: **Cinematic Editorial — Architectural** and **Modern Coastal Twilight**
+- ✅ Provider-agnostic image pipeline (Nano Banana, FLUX Kontext Pro/Max, Seedream 4 Edit, Qwen Image Edit)
+- ✅ Provider-agnostic video pipeline (Kling 2.6/3.0, Veo 3.1, Seedance 1/2.0, plus 7 local DepthFlow presets)
+- ✅ Photo classifier — auto-assigns each uploaded photo to its best slot via Gemini Flash vision
+- ✅ End-frame synthesis with a depth-driven extrapolation strategy for keyframe interpolation
+- ✅ FastAPI backend orchestrating background jobs + per-slot persistence
+- ✅ Next.js studio UI — two-step Create-by-Style wizard, live progress, regenerate, model picker, end-frame skip
+- ✅ ffmpeg concat + audio mux pipeline (faststart, exact A/V duration alignment, AAC-LC universal compat)
+- ✅ Walkthrough exports surface as clickable thumbnails in the studio
 
 ---
 

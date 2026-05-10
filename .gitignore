@@ -228,6 +228,12 @@ outputs/
 *.heic
 !templates/**/*.png
 !templates/**/*.jpg
+
+# Committed demo assets — overrides *.mp4 / *.jpg so the walkthrough demo
+# referenced from README.md is tracked.
+!assets/
+!assets/**
+
 .fal_cache/
 
 # Next.js / Node (under app/)
